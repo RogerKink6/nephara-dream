@@ -1,6 +1,7 @@
 use rand::rngs::StdRng;
 use rand::Rng;
 use serde::{Deserialize, Serialize};
+use tracing::debug;
 
 use crate::agent::{AgentId, Attributes, NeedChanges, Needs};
 use crate::config::{ActionConfig, Config, ResolutionConfig};
@@ -195,6 +196,11 @@ pub fn resolve(
 
     let need_changes = base.scale(tier.multiplier());
 
+    debug!(target: "action",
+        action = %action.name(), roll = roll, modifier = modifier,
+        penalty = penalty, total = total, dc = dc, tier = ?tier,
+        "d20 resolution");
+
     Resolution {
         action: action.clone(),
         tier,
@@ -265,17 +271,21 @@ struct ActionResponse {
 pub fn parse_response(raw: &str) -> Action {
     // 1. Try direct JSON parse
     if let Some(a) = try_parse_json(raw) {
+        debug!(target: "action", action = ?a, "Action parsed from LLM output");
         return a;
     }
     // 2. Extract from ```json ... ``` code fence
     if let Some(json) = extract_code_fence(raw) {
         if let Some(a) = try_parse_json(&json) {
+            debug!(target: "action", action = ?a, "Action parsed from LLM output");
             return a;
         }
     }
     // 3. Extract action name with regex-like scan
     if let Some(action_name) = extract_action_field(raw) {
-        return action_from_name(&action_name, None, None);
+        let a = action_from_name(&action_name, None, None);
+        debug!(target: "action", action = ?a, "Action parsed from LLM output");
+        return a;
     }
     // 4. Default
     tracing::warn!("Could not parse LLM response, defaulting to Wander. Raw: {}", &raw[..raw.len().min(200)]);

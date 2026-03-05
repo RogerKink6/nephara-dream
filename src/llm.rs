@@ -3,7 +3,7 @@ use rand::rngs::StdRng;
 use rand::Rng;
 use serde::{Deserialize, Serialize};
 use std::sync::Mutex;
-use tracing::{debug, warn};
+use tracing::{debug, info, warn};
 
 pub type Result<T> = std::result::Result<T, Box<dyn std::error::Error + Send + Sync>>;
 
@@ -61,6 +61,45 @@ struct OllamaResponse {
     response: String,
 }
 
+#[derive(Deserialize)]
+struct OllamaTagsResponse {
+    models: Vec<OllamaModelEntry>,
+}
+
+#[derive(Deserialize)]
+struct OllamaModelEntry {
+    name: String,
+}
+
+impl OllamaBackend {
+    pub async fn health_check(&self) -> Result<()> {
+        let url = format!("{}/api/tags", self.url);
+        let resp = self
+            .client
+            .get(&url)
+            .send()
+            .await
+            .map_err(|e| format!("Ollama not running at {}: {}", self.url, e))?;
+
+        if !resp.status().is_success() {
+            return Err(format!("Ollama health check failed ({})", resp.status()).into());
+        }
+
+        let tags: OllamaTagsResponse = resp
+            .json()
+            .await
+            .map_err(|e| format!("Ollama tags parse error: {}", e))?;
+
+        let names: Vec<&str> = tags.models.iter().map(|m| m.name.as_str()).collect();
+        if names.iter().any(|n| *n == self.model || n.starts_with(&format!("{}:", self.model))) {
+            info!(target: "llm", model = %self.model, "Ollama ready: model available");
+        } else {
+            warn!(target: "llm", model = %self.model, available = ?names, "Model not found in Ollama list — will try anyway");
+        }
+        Ok(())
+    }
+}
+
 #[async_trait]
 impl LlmBackend for OllamaBackend {
     async fn generate(&self, prompt: &str, max_tokens: u32, seed: Option<u64>) -> Result<String> {
@@ -76,7 +115,7 @@ impl LlmBackend for OllamaBackend {
             },
         };
 
-        debug!("Ollama request to {}", url);
+        debug!(target: "llm", model = %self.model, max_tokens = max_tokens, prompt_chars = prompt.len(), "LLM request");
         let resp = self
             .client
             .post(&url)
@@ -96,7 +135,9 @@ impl LlmBackend for OllamaBackend {
             .await
             .map_err(|e| format!("Ollama JSON parse error: {}", e))?;
 
-        Ok(ollama_resp.response)
+        let raw = ollama_resp.response;
+        debug!(target: "llm", chars = raw.len(), response = %raw, "LLM response");
+        Ok(raw)
     }
 }
 

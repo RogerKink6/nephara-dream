@@ -68,10 +68,14 @@ async fn main() {
     let cli = Cli::parse();
 
     // Logging
-    let filter = if cli.verbose { "debug" } else { "info" };
+    let filter = if cli.verbose {
+        EnvFilter::new("debug")
+    } else {
+        EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"))
+    };
     tracing_subscriber::fmt()
-        .with_env_filter(EnvFilter::new(filter))
-        .with_target(false)
+        .with_env_filter(filter)
+        .with_target(true)
         .init();
 
     if let Err(e) = run(cli).await {
@@ -109,11 +113,16 @@ async fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         }
         "ollama" | _ => {
             info!("Using OllamaBackend — model: {}, url: {}", cfg.llm.model, cfg.llm.ollama_url);
-            Arc::new(OllamaBackend::new(
+            let ollama = OllamaBackend::new(
                 cfg.llm.ollama_url.clone(),
                 cfg.llm.model.clone(),
                 cfg.llm.temperature,
-            ))
+            );
+            if let Err(e) = ollama.health_check().await {
+                error!("{}", e);
+                std::process::exit(1);
+            }
+            Arc::new(ollama)
         }
     };
 

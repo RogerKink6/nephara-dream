@@ -3,7 +3,7 @@ use rand::seq::SliceRandom;
 use rand::Rng;
 use std::collections::HashMap;
 use std::sync::Arc;
-use tracing::{info, warn};
+use tracing::{debug, info, warn};
 
 use crate::action::{self, Action, OutcomeTier, Resolution};
 use crate::agent::{Agent, LocationId, NeedChanges};
@@ -172,6 +172,7 @@ impl World {
                     warn!("LLM error for {}: {}", self.agents[idx].name(), e);
                     String::new()
                 });
+            debug!(target: "action", agent = %self.agents[idx].name(), raw = %raw, "Agent action response");
             action::parse_response(&raw)
         };
 
@@ -340,8 +341,13 @@ impl World {
                 let call_seed = Some(self.seed.wrapping_add(self.llm_call_counter));
                 self.llm_call_counter += 1;
                 let llm = Arc::clone(&self.llm);
+                debug!(target: "narrate", agent = %agent_name_str, action = %res.action.display(), tier = %res.tier.label(), "GM Narrator prompt sent");
                 let narrative = match llm.generate(&gm_prompt, 80, call_seed).await {
-                    Ok(n) if !n.trim().is_empty() => n.trim().to_string(),
+                    Ok(n) if !n.trim().is_empty() => {
+                        let n = n.trim().to_string();
+                        debug!(target: "narrate", narrative = %n, "GM Narrator response");
+                        n
+                    },
                     _ => self.narrative_for(&res, idx),
                 };
 
@@ -472,6 +478,7 @@ impl World {
         let prompt   = magic::build_interpreter_prompt(
             &self.agents[idx], intent, loc_name, &others, &self.config,
         );
+        debug!(target: "magic", intent = %intent, agent = %self.agents[idx].identity.name, numen = self.agents[idx].attributes.numen, "Interpreter prompt built");
         let call_seed = Some(self.seed.wrapping_add(self.llm_call_counter));
         self.llm_call_counter += 1;
         let llm       = Arc::clone(&self.llm);

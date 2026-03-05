@@ -1,5 +1,5 @@
 use serde::Deserialize;
-use tracing::warn;
+use tracing::{debug, warn};
 
 use crate::agent::{Agent, NeedChanges};
 use crate::config::Config;
@@ -130,13 +130,17 @@ impl InterpretedIntent {
 // ---------------------------------------------------------------------------
 
 pub fn parse_interpreter_response(raw: &str) -> Option<InterpretedIntent> {
+    debug!(target: "magic", chars = raw.len(), raw = %raw, "Interpreter raw response");
+
     if let Ok(v) = serde_json::from_str::<InterpretedIntent>(raw.trim()) {
+        debug!(target: "magic", primary = %v.primary_effect, duration = v.duration_ticks, "Interpreter parsed");
         return Some(v);
     }
 
     // Extract from code fence
     if let Some(json) = extract_code_fence(raw) {
         if let Ok(v) = serde_json::from_str::<InterpretedIntent>(&json) {
+            debug!(target: "magic", primary = %v.primary_effect, duration = v.duration_ticks, "Interpreter parsed");
             return Some(v);
         }
     }

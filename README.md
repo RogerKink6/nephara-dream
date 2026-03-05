@@ -110,6 +110,33 @@ cargo clippy
 cargo run -- --llm mock --verbose
 ```
 
+### Log Categories
+
+`RUST_LOG` filters against named targets. The following categories are available:
+
+| Target | What it covers |
+|--------|----------------|
+| `llm` | Ollama health check, every request (model, tokens, prompt chars), every raw response |
+| `action` | Raw LLM response per agent, parsed action, d20 roll details, outcome tier |
+| `magic` | Interpreter prompt built, raw Interpreter response, parsed InterpretedIntent |
+| `narrate` | GM Narrator prompt sent, raw narrative response |
+
+Examples:
+
+```sh
+# General info + all LLM traffic
+RUST_LOG=info,llm=debug cargo run -- --llm mock --ticks 6 --seed 42
+
+# Only d20 rolls and action parsing
+RUST_LOG=off,action=debug cargo run -- --llm mock --ticks 6 --seed 42
+
+# Full firehose
+RUST_LOG=debug cargo run -- --llm mock --ticks 6 --seed 42
+
+# Live run: confirm Ollama is ready, then watch LLM round-trips
+RUST_LOG=info,llm=debug cargo run -- --ticks 6
+```
+
 ## Project Structure
 
 ```
