@@ -4,9 +4,9 @@ day_start_tick   = 0    # Tick 0 = dawn
 night_start_tick = 32   # Tick 32 = nightfall (~4 PM)
 
 [needs.decay_per_tick]
-hunger  = 1.5
-energy  = 1.2
-fun     = 0.8
+hunger  = 1.0
+energy  = 0.8
+fun     = 0.5
 social  = 0.6
 hygiene = 0.3
 

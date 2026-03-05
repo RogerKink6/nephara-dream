@@ -149,7 +149,7 @@ pub fn write_state_dump(
         "tick":  tick,
         "agents": agents.iter().map(|a| serde_json::json!({
             "name":     a.name(),
-            "location": format!("{:?}", a.location),
+            "pos":      [a.pos.0, a.pos.1],
             "busy_ticks": a.busy_ticks,
             "needs": {
                 "hunger":  a.needs.hunger,

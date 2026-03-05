@@ -178,44 +178,16 @@ impl NeedChanges {
 // Agent
 // ---------------------------------------------------------------------------
 
-/// LocationId duplicated here to avoid a circular module dep; world.rs re-exports it.
-/// The canonical definition lives in world.rs.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
-pub enum LocationId {
-    VillageSquare,
-    Tavern,
-    Forest,
-    River,
-    Home(usize),
-}
-
-impl LocationId {
-    pub fn display_name(&self) -> &str {
-        match self {
-            LocationId::VillageSquare => "Village Square",
-            LocationId::Tavern        => "Tavern",
-            LocationId::Forest        => "Forest",
-            LocationId::River         => "River",
-            LocationId::Home(0)       => "Home (Rowan's)",
-            LocationId::Home(1)       => "Home (Elara's)",
-            LocationId::Home(2)       => "Home (Thane's)",
-            LocationId::Home(n)       => {
-                // Static strings for arbitrary indices aren't easy; return a fallback.
-                let _ = n;
-                "Home"
-            }
-        }
-    }
-}
-
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Agent {
     pub id:                AgentId,
     pub identity:          AgentIdentity,
     pub attributes:        Attributes,
     pub needs:             Needs,
-    pub location:          LocationId,
-    pub home:              LocationId,
+    /// Current grid position (x, y) — x=column, y=row.
+    pub pos:               (u8, u8),
+    /// Home tile position — where the agent sleeps.
+    pub home_pos:          (u8, u8),
     pub memory:            VecDeque<String>,
     pub busy_ticks:        u32,
     /// Energy restored per tick while sleeping (None when not sleeping).
@@ -223,8 +195,7 @@ pub struct Agent {
 }
 
 impl Agent {
-    pub fn from_soul(id: AgentId, soul: &SoulSeed, config: &Config) -> Self {
-        let home = LocationId::Home(id);
+    pub fn from_soul(id: AgentId, soul: &SoulSeed, config: &Config, home_pos: (u8, u8)) -> Self {
         Agent {
             id,
             identity: AgentIdentity {
@@ -242,8 +213,8 @@ impl Agent {
                 numen: soul.numen,
             },
             needs:             Needs::from_initial(&config.needs.initial),
-            location:          home.clone(),
-            home,
+            pos:               home_pos,
+            home_pos,
             memory:            VecDeque::new(),
             busy_ticks:        0,
             sleep_energy_tick: None,

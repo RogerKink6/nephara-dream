@@ -14,8 +14,15 @@ pub type Result<T> = std::result::Result<T, Box<dyn std::error::Error + Send + S
 #[async_trait]
 pub trait LlmBackend: Send + Sync {
     /// Generate a completion for the given prompt.
-    /// `seed` — when Some, passes the seed to the backend for deterministic output.
-    async fn generate(&self, prompt: &str, max_tokens: u32, seed: Option<u64>) -> Result<String>;
+    /// `seed`   — when Some, passes the seed to the backend for deterministic output.
+    /// `schema` — when Some, passed as Ollama's `format` field to constrain output.
+    async fn generate(
+        &self,
+        prompt:    &str,
+        max_tokens: u32,
+        seed:      Option<u64>,
+        schema:    Option<&serde_json::Value>,
+    ) -> Result<String>;
 }
 
 // ---------------------------------------------------------------------------
@@ -46,6 +53,8 @@ struct OllamaRequest<'a> {
     prompt:  &'a str,
     stream:  bool,
     options: OllamaOptions,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    format:  Option<&'a serde_json::Value>,
 }
 
 #[derive(Serialize)]
@@ -102,8 +111,14 @@ impl OllamaBackend {
 
 #[async_trait]
 impl LlmBackend for OllamaBackend {
-    async fn generate(&self, prompt: &str, max_tokens: u32, seed: Option<u64>) -> Result<String> {
-        let url = format!("{}/api/generate", self.url);
+    async fn generate(
+        &self,
+        prompt:    &str,
+        max_tokens: u32,
+        seed:      Option<u64>,
+        schema:    Option<&serde_json::Value>,
+    ) -> Result<String> {
+        let url  = format!("{}/api/generate", self.url);
         let body = OllamaRequest {
             model:  &self.model,
             prompt,
@@ -113,9 +128,11 @@ impl LlmBackend for OllamaBackend {
                 num_predict: max_tokens,
                 seed: seed.map(|s| s as i64),
             },
+            format: schema,
         };
 
-        debug!(target: "llm", model = %self.model, max_tokens = max_tokens, prompt_chars = prompt.len(), "LLM request");
+        debug!(target: "llm", model = %self.model, max_tokens = max_tokens,
+               prompt_chars = prompt.len(), has_schema = schema.is_some(), "LLM request");
         let resp = self
             .client
             .post(&url)
@@ -215,6 +232,7 @@ fn mock_actions(rng: &mut StdRng) -> &'static str {
         r#"{"action":"move","target":"Tavern","intent":null,"reason":"heading to the tavern"}"#,
         r#"{"action":"move","target":"Forest","intent":null,"reason":"wandering into the forest"}"#,
         r#"{"action":"move","target":"River","intent":null,"reason":"going to the river"}"#,
+        r#"{"action":"move","target":"home","intent":null,"reason":"going home"}"#,
         r#"{"action":"chat","target":"Elara","intent":null,"reason":"want to talk"}"#,
         r#"{"action":"chat","target":"Rowan","intent":null,"reason":"want to talk"}"#,
         r#"{"action":"chat","target":"Thane","intent":null,"reason":"want to talk"}"#,
@@ -225,7 +243,13 @@ fn mock_actions(rng: &mut StdRng) -> &'static str {
 
 #[async_trait]
 impl LlmBackend for MockBackend {
-    async fn generate(&self, prompt: &str, _max_tokens: u32, _seed: Option<u64>) -> Result<String> {
+    async fn generate(
+        &self,
+        prompt:    &str,
+        _max_tokens: u32,
+        _seed:     Option<u64>,
+        _schema:   Option<&serde_json::Value>,
+    ) -> Result<String> {
         let mut rng = self.rng.lock().expect("mock rng poisoned");
 
         // Detect prompt type by content — order matters

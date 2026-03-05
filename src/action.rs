@@ -3,8 +3,27 @@ use rand::Rng;
 use serde::{Deserialize, Serialize};
 use tracing::debug;
 
-use crate::agent::{AgentId, Attributes, NeedChanges, Needs};
+use crate::agent::{Attributes, NeedChanges, Needs};
 use crate::config::{ActionConfig, Config, ResolutionConfig};
+
+// ---------------------------------------------------------------------------
+// Structured output schema builder
+// ---------------------------------------------------------------------------
+
+/// Build a JSON schema that constrains the LLM's action response to valid
+/// canonical action names only. Pass this to Ollama's `format` field.
+pub fn build_action_schema(canonical_names: &[&str]) -> serde_json::Value {
+    serde_json::json!({
+        "type": "object",
+        "required": ["action", "reason"],
+        "properties": {
+            "action":  { "type": "string", "enum": canonical_names },
+            "target":  { "type": ["string", "null"] },
+            "intent":  { "type": ["string", "null"] },
+            "reason":  { "type": "string" }
+        }
+    })
+}
 
 // ---------------------------------------------------------------------------
 // Action enum

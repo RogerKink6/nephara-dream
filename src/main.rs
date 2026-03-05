@@ -16,7 +16,7 @@ use tracing::{error, info};
 use tracing_subscriber::EnvFilter;
 
 use llm::{LlmBackend, MockBackend, OllamaBackend};
-use log::{RunLog, TickEntry};
+use log::RunLog;
 use world::World;
 
 // ---------------------------------------------------------------------------
@@ -153,9 +153,10 @@ async fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     for _t in 0..total_ticks {
         let result = world.tick().await?;
 
-        // Print tick header
+        // Print tick header + map
         let header = log::tick_header(result.tick, result.day, result.time_of_day);
         world.run_log.write_line(&header);
+        world.run_log.write_line(&result.map);
 
         // Print entries
         for entry in &result.entries {
