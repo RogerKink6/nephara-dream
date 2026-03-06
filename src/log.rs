@@ -255,6 +255,46 @@ pub fn append_wishes(souls_dir: &str, agent_name: &str, header: &str, content: &
 }
 
 // ---------------------------------------------------------------------------
+// Prayer persistence
+// ---------------------------------------------------------------------------
+
+pub fn append_prayer(souls_dir: &str, agent_name: &str, header: &str, content: &str) {
+    let path  = format!("{}/{}.prayers.md", souls_dir, agent_name.to_lowercase());
+    let entry = format!("\n{}\n{}\n", header, content);
+    let file  = OpenOptions::new().create(true).append(true).open(&path);
+    match file {
+        Ok(mut f) => { let _ = f.write_all(entry.as_bytes()); }
+        Err(e)    => warn!("Could not append prayer for {}: {}", agent_name, e),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Oracle persistence
+// ---------------------------------------------------------------------------
+
+pub fn load_oracle_response(souls_dir: &str, agent_name: &str) -> String {
+    let path = format!("{}/{}.oracle_responses.md", souls_dir, agent_name.to_lowercase());
+    fs::read_to_string(&path).unwrap_or_default()
+}
+
+pub fn archive_oracle_response(souls_dir: &str, agent_name: &str, content: &str) {
+    // Append to history
+    let history_path = format!("{}/{}.oracle_history.md", souls_dir, agent_name.to_lowercase());
+    let date  = Local::now().format("%Y-%m-%d");
+    let entry = format!("\n## {} — {}\n{}\n", agent_name, date, content);
+    let file  = OpenOptions::new().create(true).append(true).open(&history_path);
+    match file {
+        Ok(mut f) => { let _ = f.write_all(entry.as_bytes()); }
+        Err(e)    => warn!("Could not append oracle history for {}: {}", agent_name, e),
+    }
+    // Clear the response file
+    let response_path = format!("{}/{}.oracle_responses.md", souls_dir, agent_name.to_lowercase());
+    if let Err(e) = fs::write(&response_path, "") {
+        warn!("Could not clear oracle responses for {}: {}", agent_name, e);
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Story persistence
 // ---------------------------------------------------------------------------
 

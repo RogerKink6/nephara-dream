@@ -47,6 +47,7 @@ pub enum TileType {
     Well,
     Meadow,
     Home(usize),
+    Temple,
 }
 
 fn tile_char(tile: TileType) -> char {
@@ -59,6 +60,7 @@ fn tile_char(tile: TileType) -> char {
         TileType::Well    => 'W',
         TileType::Meadow  => 'M',
         TileType::Home(_) => 'h',
+        TileType::Temple  => 'P',
     }
 }
 
@@ -219,6 +221,7 @@ pub struct World {
     pub magic_count:         u32,
     pub magic_cast_this_day: Vec<bool>,
     pub resource_nodes:      Vec<ResourceNode>,
+    pub is_test_run:         bool,
     grid:                    [[TileType; GRID_W]; GRID_H],
     rng:                     StdRng,
     llm:                     Arc<dyn LlmBackend>,
@@ -232,14 +235,15 @@ impl World {
     // -----------------------------------------------------------------------
 
     pub fn new(
-        seeds:     Vec<SoulSeed>,
-        config:    Config,
-        seed:      u64,
-        rng:       StdRng,
-        llm:       Arc<dyn LlmBackend>,
-        llm_smart: Arc<dyn LlmBackend>,
-        run_log:   RunLog,
-        souls_dir: String,
+        seeds:       Vec<SoulSeed>,
+        config:      Config,
+        seed:        u64,
+        rng:         StdRng,
+        llm:         Arc<dyn LlmBackend>,
+        llm_smart:   Arc<dyn LlmBackend>,
+        run_log:     RunLog,
+        souls_dir:   String,
+        is_test_run: bool,
     ) -> Self {
         let agents = seeds.iter().enumerate()
             .map(|(i, s)| Agent::from_soul(i, s, &config, home_pos_for(i)))
@@ -257,6 +261,7 @@ impl World {
             magic_count: 0,
             magic_cast_this_day: vec![false; seeds.len()],
             resource_nodes,
+            is_test_run,
             grid,
             rng,
             llm,
@@ -265,10 +270,15 @@ impl World {
         }
     }
 
-    /// Load life stories from file for each agent (called after construction).
+    /// Load life stories and oracle responses for each agent (called after construction).
     pub async fn load_stories(&mut self) {
         for agent in &mut self.agents {
             agent.life_story = runlog::load_story(&self.souls_dir, &agent.identity.name);
+            let oracle = runlog::load_oracle_response(&self.souls_dir, &agent.identity.name);
+            if !oracle.trim().is_empty() {
+                agent.oracle_pending = true;
+                tracing::info!(agent = %agent.identity.name, "Oracle response pending");
+            }
         }
     }
 
@@ -407,6 +417,10 @@ impl World {
         let tile = self.tile_at(pos);
 
         match action {
+            Action::ReadOracle if !(
+                self.tile_at(self.agents[idx].pos) == TileType::Temple
+                    && self.agents[idx].oracle_pending
+            ) => self.wander_action(idx),
             Action::Eat     if !self.tile_allows(tile, "eat")     => self.wander_action(idx),
             Action::Cook    if !self.tile_allows(tile, "cook")    => self.wander_action(idx),
             Action::Sleep   if !self.is_at_own_home(idx)          => self.wander_action(idx),
@@ -459,6 +473,7 @@ impl World {
             ("Tavern",         TileType::Tavern),
             ("Village Well",   TileType::Well),
             ("Eastern Meadow", TileType::Meadow),
+            ("Temple",         TileType::Temple),
         ];
         let valid: Vec<_> = options.iter()
             .filter(|(_, t)| *t != current_tile)
@@ -545,6 +560,16 @@ impl World {
             // ---- Cast Intent ----
             Action::CastIntent { intent } => {
                 self.resolve_cast_intent(idx, &intent, loc_name, tick, day, tod).await
+            }
+
+            // ---- Pray ----
+            Action::Pray { prayer } => {
+                self.resolve_pray(idx, &prayer, loc_name, tick, day, tod).await
+            }
+
+            // ---- Read Oracle ----
+            Action::ReadOracle => {
+                self.resolve_read_oracle(idx, loc_name, tick, day, tod).await
             }
 
             // ---- Sleep ----
@@ -735,13 +760,13 @@ impl World {
         let call_seed   = Some(self.seed.wrapping_add(self.llm_call_counter));
         self.llm_call_counter += 1;
         let llm         = Arc::clone(&self.llm);
-        let summary     = llm
-            .generate(&chat_prompt, 80, call_seed, None)
+        let raw_chat    = llm
+            .generate(&chat_prompt, 150, call_seed, None)
             .await
             .unwrap_or_else(|_| {
                 format!("{} and {} exchange a few words.", self.agents[idx].name(), self.agents[target_idx].name())
             });
-        let summary = summary.trim().trim_matches('"').to_string();
+        let (summary, exchange) = Self::parse_chat_response(&raw_chat);
 
         let res = {
             let agent = &self.agents[idx];
@@ -764,15 +789,19 @@ impl World {
         self.agents[target_idx].needs.apply(&changes);
         self.agents[target_idx].push_memory(mem_b, buf);
 
-        let check_line = res.check_line();
-        let tier_label = res.tier.label().to_string();
+        let check_line   = res.check_line();
+        let tier_label   = res.tier.label().to_string();
+        let outcome_line = match exchange {
+            Some(ex) => format!("{}\n[{}]", ex, changes.describe()),
+            None     => format!("{} [{}]", summary, changes.describe()),
+        };
         Ok(TickEntry {
             agent_id:           idx,
             agent_pos:          self.agents[idx].pos,
             agent_name:         self.agents[idx].name().to_string(),
             location:           loc_name.to_string(),
             action_line:        format!("Chat with {} | {}", self.agents[target_idx].name(), check_line),
-            outcome_line:       format!("{} [{}]", summary, changes.describe()),
+            outcome_line,
             outcome_tier_label: if res.dc > 0 { Some(tier_label) } else { None },
         })
     }
@@ -898,6 +927,136 @@ impl World {
     }
 
     // -----------------------------------------------------------------------
+    // Pray resolution
+    // -----------------------------------------------------------------------
+
+    async fn resolve_pray(
+        &mut self,
+        idx:      usize,
+        prayer:   &str,
+        loc_name: &str,
+        tick:     u32,
+        day:      u32,
+        tod:      &str,
+    ) -> Result<TickEntry, Box<dyn std::error::Error + Send + Sync>> {
+        let cfg = self.config.actions.pray.clone();
+        let need_changes = crate::agent::NeedChanges {
+            fun:    cfg.fun_restore,
+            social: cfg.social_restore,
+            ..Default::default()
+        };
+        self.agents[idx].needs.apply(&need_changes);
+
+        if !self.is_test_run {
+            let header = format!("## Day {} Tick {} ({})", day, tick, tod);
+            runlog::append_prayer(&self.souls_dir, &self.agents[idx].identity.name, &header, prayer);
+        }
+
+        let prayer_short = &prayer[..prayer.len().min(60)];
+        let mem = format!("Tick {tick} | Day {day} | {tod} | Prayed: \"{prayer_short}\"");
+        let buf = self.config.memory.buffer_size;
+        self.agents[idx].push_memory(mem, buf);
+
+        let name = self.agents[idx].name().to_string();
+        Ok(TickEntry {
+            agent_id:           idx,
+            agent_pos:          self.agents[idx].pos,
+            agent_name:         name.clone(),
+            location:           loc_name.to_string(),
+            action_line:        format!("Pray: \"{}\"", prayer),
+            outcome_line:       format!("{} kneels and speaks a quiet prayer.", name),
+            outcome_tier_label: None,
+        })
+    }
+
+    // -----------------------------------------------------------------------
+    // Read Oracle resolution
+    // -----------------------------------------------------------------------
+
+    async fn resolve_read_oracle(
+        &mut self,
+        idx:      usize,
+        loc_name: &str,
+        tick:     u32,
+        day:      u32,
+        tod:      &str,
+    ) -> Result<TickEntry, Box<dyn std::error::Error + Send + Sync>> {
+        let content = runlog::load_oracle_response(&self.souls_dir, &self.agents[idx].identity.name);
+        let name    = self.agents[idx].name().to_string();
+
+        if content.trim().is_empty() {
+            self.agents[idx].oracle_pending = false;
+            return Ok(TickEntry {
+                agent_id:           idx,
+                agent_pos:          self.agents[idx].pos,
+                agent_name:         name.clone(),
+                location:           loc_name.to_string(),
+                action_line:        "Read Oracle".to_string(),
+                outcome_line:       format!("{} approaches the altar, but the message has faded.", name),
+                outcome_tier_label: None,
+            });
+        }
+
+        let cfg = self.config.actions.read_oracle.clone();
+        let need_changes = crate::agent::NeedChanges {
+            fun:    cfg.fun_restore,
+            social: cfg.social_restore,
+            ..Default::default()
+        };
+        self.agents[idx].needs.apply(&need_changes);
+
+        let personality = self.agents[idx].identity.personality.clone();
+        let prompt = format!(
+            "You are {name}. {personality}\n\n\
+             You have just read a divine message at the Temple:\n\
+             \"{content}\"\n\n\
+             In 1-2 sentences, speak your reaction aloud — in your own voice, in character.\n\
+             Do not describe what you do; only speak.",
+            name        = name,
+            personality = personality,
+            content     = content.trim(),
+        );
+
+        let call_seed     = Some(self.seed.wrapping_add(self.llm_call_counter));
+        self.llm_call_counter += 1;
+        let llm           = Arc::clone(&self.llm_smart);
+        let oracle_tokens = self.config.llm.oracle_max_tokens;
+        let reaction      = llm.generate(&prompt, oracle_tokens, call_seed, None).await
+            .unwrap_or_else(|e| {
+                warn!("Oracle LLM error for {}: {}", name, e);
+                format!("{} stands in silent awe.", name)
+            });
+        let reaction = reaction.trim().to_string();
+
+        if !self.is_test_run {
+            runlog::archive_oracle_response(&self.souls_dir, &name, content.trim());
+        }
+
+        let reaction_short = &reaction[..reaction.len().min(80)];
+        let mem = format!("Tick {tick} | Day {day} | {tod} | Read Oracle at Temple — \"{reaction_short}\"");
+        let buf = self.config.memory.buffer_size;
+        self.agents[idx].push_memory(mem, buf);
+
+        self.agents[idx].oracle_pending = false;
+
+        let ev = format!("Day {day}: {name} received an oracle message at the Temple");
+        self.notable_events.push((idx, ev));
+
+        let run_id = self.run_log.run_id.clone();
+        runlog::log_introspection(&run_id, &name, day, "Oracle Reading", &reaction);
+
+        Ok(TickEntry {
+            agent_id:           idx,
+            agent_pos:          self.agents[idx].pos,
+            agent_name:         name,
+            location:           loc_name.to_string(),
+            action_line:        "Read Oracle".to_string(),
+            outcome_line:       reaction,
+            outcome_tier_label: None,
+        })
+    }
+
+    // -----------------------------------------------------------------------
     // Prompt builders
     // -----------------------------------------------------------------------
 
@@ -979,6 +1138,12 @@ impl World {
             String::new()
         };
 
+        let oracle_nudge = if self.agents[idx].oracle_pending {
+            "\nYou feel that your prayers have been heard. Something waits for you at the Temple.\n".to_string()
+        } else {
+            String::new()
+        };
+
         format!(
             r#"You are {name}. {personality}
 
@@ -1004,7 +1169,7 @@ NEARBY: {nearby}
 
 VIEWPORT (you are [X]):
 {viewport}
-(legend: F=Forest ~=River S=Square V=Tavern W=Well M=Meadow h=Home X=you)
+(legend: F=Forest ~=River S=Square V=Tavern W=Well M=Meadow h=Home P=Temple X=you)
 {region_note}
 
 RECENT MEMORY (newest first):
@@ -1015,7 +1180,7 @@ AVAILABLE ACTIONS:
 
 Magic is real and available to you at any time via cast_intent.
 Speak your desire and it will manifest — though words carry all their meanings.
-{magic_nudge}
+{magic_nudge}{oracle_nudge}
 Avoid repeating the same action twice in a row. Your personality should guide what you do.
 
 Choose ONE action. Respond with ONLY a JSON object:
@@ -1046,6 +1211,7 @@ Choose ONE action. Respond with ONLY a JSON object:
             last_action_note = last_action_note,
             actions          = actions_str,
             magic_nudge      = magic_nudge,
+            oracle_nudge     = oracle_nudge,
         )
     }
 
@@ -1102,8 +1268,10 @@ Choose ONE action. Respond with ONLY a JSON object:
             let run_id    = self.run_log.run_id.clone();
             debug!(target: "reflection", agent = %name, day = day, "Story updated");
             self.agents[idx].life_story = trimmed.clone();
-            runlog::save_story(&souls_dir, &name, &trimmed);
-            runlog::append_day_journal(&souls_dir, &name, &run_id, day, &trimmed);
+            if !self.is_test_run {
+                runlog::save_story(&souls_dir, &name, &trimmed);
+                runlog::append_day_journal(&souls_dir, &name, &run_id, day, &trimmed);
+            }
             runlog::log_introspection(&run_id, &name, day, "End-of-Day Reflection", &trimmed);
         }
         Ok(())
@@ -1130,7 +1298,9 @@ Choose ONE action. Respond with ONLY a JSON object:
             let souls_dir = self.souls_dir.clone();
             let run_id    = self.run_log.run_id.clone();
             self.agents[idx].desires = Some(trimmed.clone());
-            runlog::append_wishes(&souls_dir, &name, &format!("## Day {}", day), &trimmed);
+            if !self.is_test_run {
+                runlog::append_wishes(&souls_dir, &name, &format!("## Day {}", day), &trimmed);
+            }
             runlog::log_introspection(&run_id, &name, day, "End-of-Day Desires", &trimmed);
         }
         Ok(())
@@ -1154,7 +1324,9 @@ Choose ONE action. Respond with ONLY a JSON object:
                 let souls_dir = self.souls_dir.clone();
                 let run_id    = self.run_log.run_id.clone();
                 let day       = self.tick_num / self.config.time.ticks_per_day + 1;
-                runlog::append_wishes(&souls_dir, &name, &format!("## Run {} End", run_id), &trimmed);
+                if !self.is_test_run {
+                    runlog::append_wishes(&souls_dir, &name, &format!("## Run {} End", run_id), &trimmed);
+                }
                 runlog::log_introspection(&run_id, &name, day, "End-of-Run Desires", &trimmed);
             }
         }
@@ -1272,26 +1444,68 @@ Choose ONE action. Respond with ONLY a JSON object:
     fn build_chat_prompt(&self, a_idx: usize, b_idx: usize) -> String {
         let a = &self.agents[a_idx];
         let b = &self.agents[b_idx];
-        let a_mem = a.memory.iter().next().cloned().unwrap_or_default();
-        let b_mem = b.memory.iter().next().cloned().unwrap_or_default();
+        let a_mem          = a.memory.iter().next().cloned().unwrap_or_default();
+        let b_mem          = b.memory.iter().next().cloned().unwrap_or_default();
+        let a_intentions   = a.daily_intentions.as_deref().unwrap_or("(no stated intentions)");
+        let b_intentions   = b.daily_intentions.as_deref().unwrap_or("(no stated intentions)");
+        let a_desires      = a.desires.as_deref().unwrap_or("(no known desires)");
+        let b_desires      = b.desires.as_deref().unwrap_or("(no known desires)");
+        let a_name         = a.identity.name.clone();
+        let b_name         = b.identity.name.clone();
         format!(
-            r#"Two villagers in Nephara are having a brief conversation.
+            r#"Two villagers in Nephara are having a conversation.
 
 {a_name}: {a_personality}
-  Recent memory: {a_mem}
+  Today's intentions: {a_intentions}
+  Desires: {a_desires}
+  Most recent memory: {a_mem}
 
 {b_name}: {b_personality}
-  Recent memory: {b_mem}
+  Today's intentions: {b_intentions}
+  Desires: {b_desires}
+  Most recent memory: {b_mem}
 
-Write ONE sentence that summarises what they talk about or say to each other.
-Do not use quotation marks. Do not use names in the sentence. Just the summary."#,
-            a_name        = a.identity.name,
+Write a brief realistic exchange (1-2 lines each), then a one-sentence summary.
+Respond ONLY with JSON — no other text:
+{{"summary": "one sentence topic, no names, no quotes", "exchange": "{a_name}: ...\n{b_name}: ..."}}
+"#,
+            a_name        = a_name,
             a_personality = a.identity.personality,
-            b_name        = b.identity.name,
+            b_name        = b_name,
             b_personality = b.identity.personality,
+            a_intentions  = a_intentions,
+            b_intentions  = b_intentions,
+            a_desires     = a_desires,
+            b_desires     = b_desires,
             a_mem         = a_mem,
             b_mem         = b_mem,
         )
+    }
+
+    fn parse_chat_response(raw: &str) -> (String, Option<String>) {
+        #[derive(serde::Deserialize)]
+        struct ChatResponse {
+            summary:  String,
+            exchange: Option<String>,
+        }
+
+        fn extract_fence(s: &str) -> Option<String> {
+            let start = s.find("```")?;
+            let rest  = &s[start + 3..];
+            let rest  = rest.trim_start_matches(|c: char| c.is_alphabetic());
+            let end   = rest.find("```")?;
+            Some(rest[..end].trim().to_string())
+        }
+
+        if let Ok(cr) = serde_json::from_str::<ChatResponse>(raw.trim()) {
+            return (cr.summary, cr.exchange.filter(|e| !e.is_empty()));
+        }
+        if let Some(json) = extract_fence(raw) {
+            if let Ok(cr) = serde_json::from_str::<ChatResponse>(&json) {
+                return (cr.summary, cr.exchange.filter(|e| !e.is_empty()));
+            }
+        }
+        (raw.trim().to_string(), None)
     }
 
     // -----------------------------------------------------------------------
@@ -1318,6 +1532,11 @@ Do not use quotation marks. Do not use names in the sentence. Just the summary."
             a.id != idx && Self::chebyshev_dist(a.pos, pos) <= 1 && !a.is_busy()
         }) {
             v.push("chat");
+        }
+
+        v.push("pray");
+        if tile == TileType::Temple && self.agents[idx].oracle_pending {
+            v.push("read_oracle");
         }
 
         v.push("move");
@@ -1351,6 +1570,11 @@ Do not use quotation marks. Do not use names in the sentence. Just the summary."
             }
         }
 
+        v.push("pray (always works) — speak a prayer; saved to your prayer record".to_string());
+        if tile == TileType::Temple && self.agents[idx].oracle_pending {
+            v.push("read_oracle (Temple only) — receive a divine response at the altar".to_string());
+        }
+
         let regions: &[(&str, TileType)] = &[
             ("Forest",         TileType::Forest),
             ("River",          TileType::River),
@@ -1358,6 +1582,7 @@ Do not use quotation marks. Do not use names in the sentence. Just the summary."
             ("Tavern",         TileType::Tavern),
             ("Village Well",   TileType::Well),
             ("Eastern Meadow", TileType::Meadow),
+            ("Temple",         TileType::Temple),
             ("home",           TileType::Home(idx)),
         ];
         for (name, ttype) in regions {
@@ -1500,6 +1725,7 @@ Do not use quotation marks. Do not use names in the sentence. Just the summary."
             ('W', TileType::Well,    "Village Well"),
             ('M', TileType::Meadow,  "Eastern Meadow"),
             ('h', TileType::Home(0), "Home"),
+            ('P', TileType::Temple,  "Temple"),
         ];
         for (ch, tile, label) in tiles {
             legend.push(format!("{} {}",
@@ -1583,6 +1809,7 @@ Do not use quotation marks. Do not use names in the sentence. Just the summary."
             ("Tavern",         TileType::Tavern),
             ("Village Well",   TileType::Well),
             ("Eastern Meadow", TileType::Meadow),
+            ("Temple",         TileType::Temple),
         ];
         let mut parts = Vec::new();
         for (name, ttype) in regions {
@@ -1626,6 +1853,7 @@ Do not use quotation marks. Do not use names in the sentence. Just the summary."
                     "Home".to_string()
                 }
             }
+            TileType::Temple  => "Temple".to_string(),
         }
     }
 
@@ -1639,6 +1867,7 @@ Do not use quotation marks. Do not use names in the sentence. Just the summary."
             TileType::Well    => "A stone well, cool and deep. Clear water drawn fresh from the earth.",
             TileType::Meadow  => "Wide open meadows of swaying grass. Room to run, to play, to breathe.",
             TileType::Home(_) => "A small, cosy home. Familiar and safe.",
+        TileType::Temple  => "An ancient stone temple. Incense drifts from its arched doorway. A quiet place of prayer and contemplation.",
         }
     }
 
@@ -1652,6 +1881,7 @@ Do not use quotation marks. Do not use names in the sentence. Just the summary."
             TileType::Well    => matches!(action, "bathe" | "rest"),
             TileType::Meadow  => matches!(action, "play" | "exercise" | "explore"),
             TileType::Home(_) => matches!(action, "eat" | "cook" | "sleep"),
+            TileType::Temple  => matches!(action, "read_oracle"),
         }
     }
 
@@ -1670,6 +1900,7 @@ Do not use quotation marks. Do not use names in the sentence. Just the summary."
             "well" | "village well"                     => return Some(TileType::Well),
             "meadow" | "eastern meadow"                 => return Some(TileType::Meadow),
             "home" | "my home" | "my house"             => return Some(TileType::Home(agent_idx)),
+            "temple"                                     => return Some(TileType::Temple),
             _ => {}
         }
         if lower.contains("rowan") && lower.contains("home") { return Some(TileType::Home(1)); }
@@ -1774,6 +2005,9 @@ fn build_grid() -> [[TileType; GRID_W]; GRID_H] {
 
     // Meadow: rows 18..30, cols 22..32
     for row in 18..30 { for col in 22..32 { g[row][col] = TileType::Meadow; } }
+
+    // Temple: rows 10..13, cols 8..12 (north of Village Square)
+    for row in 10..13 { for col in 8..12 { g[row][col] = TileType::Temple; } }
 
     // Home tiles
     for (i, &(hx, hy)) in HOME_POSITIONS.iter().enumerate() {

@@ -194,14 +194,14 @@ static MOCK_INTERPRETER_RESPONSES: &[&str] = &[
 
 // Preset intents for cast_intent actions
 static MOCK_CHAT_SUMMARIES: &[&str] = &[
-    "They discuss the strange weather and share a laugh about it",
-    "One mentions a dream they had; the other nods with quiet recognition",
-    "They trade observations about the forest and what they've heard lately",
-    "A short exchange about food, and what might be good for dinner",
-    "They talk about the river, and whether the fish are biting",
-    "One asks the other how they are; the answer is honest and brief",
-    "They speak of small things — the quality of the light, the smell of the air",
-    "They notice they are both going nowhere in particular, and feel better for it",
+    r#"{"summary":"they discuss the strange weather and share a laugh","exchange":"Elara: This wind has been strange all morning.\nRowan: I noticed. Let's hope it passes soon."}"#,
+    r#"{"summary":"one shares a dream; the other listens quietly","exchange":"Rowan: I dreamed of water last night, very still water.\nElara: That sounds peaceful, if a little unsettling."}"#,
+    r#"{"summary":"they trade observations about the forest","exchange":"Elara: The forest has been quiet lately.\nThane: Too quiet. Something shifted after the last rain."}"#,
+    r#"{"summary":"a short exchange about food and dinner plans","exchange":"Thane: I could eat. The tavern might be open.\nRowan: Let's go. I'm tired of foraging."}"#,
+    r#"{"summary":"they wonder together about the river and the fish","exchange":"Rowan: The fish are biting today, I can feel it.\nElara: You always say that. You're usually wrong."}"#,
+    r#"{"summary":"one asks the other how they are; the answer is honest","exchange":"Elara: How are you holding up?\nThane: Tired. But better for being asked."}"#,
+    r#"{"summary":"they speak of small things, the light and the air","exchange":"Thane: There's something in the air today.\nRowan: Yes. Like before a storm, but cleaner."}"#,
+    r#"{"summary":"they discover they are both wandering with no destination","exchange":"Rowan: Where are you headed?\nElara: Nowhere in particular. You?\nRowan: Same."}"#,
 ];
 
 static MOCK_INTENTS: &[&str] = &[
@@ -233,9 +233,13 @@ fn mock_actions(rng: &mut StdRng) -> &'static str {
         r#"{"action":"move","target":"Forest","intent":null,"reason":"wandering into the forest"}"#,
         r#"{"action":"move","target":"River","intent":null,"reason":"going to the river"}"#,
         r#"{"action":"move","target":"home","intent":null,"reason":"going home"}"#,
+        r#"{"action":"move","target":"Temple","intent":null,"reason":"feeling drawn to the Temple"}"#,
         r#"{"action":"chat","target":"Elara","intent":null,"reason":"want to talk"}"#,
         r#"{"action":"chat","target":"Rowan","intent":null,"reason":"want to talk"}"#,
         r#"{"action":"chat","target":"Thane","intent":null,"reason":"want to talk"}"#,
+        r#"{"action":"pray","target":null,"intent":"I offer gratitude for another day","reason":"feeling spiritual"}"#,
+        r#"{"action":"pray","target":null,"intent":"May those I love find peace","reason":"thinking of others"}"#,
+        r#"{"action":"read_oracle","target":null,"intent":null,"reason":"something waits at the altar"}"#,
     ];
     let idx = rng.gen_range(0..choices.len());
     choices[idx]
@@ -300,9 +304,19 @@ impl LlmBackend for MockBackend {
             let idx = rng.gen_range(0..MOCK_INTERPRETER_RESPONSES.len());
             return Ok(MOCK_INTERPRETER_RESPONSES[idx].to_string());
         }
-        if prompt.contains("brief conversation") {
+        if prompt.contains("having a conversation") || prompt.contains("brief conversation") {
             let idx = rng.gen_range(0..MOCK_CHAT_SUMMARIES.len());
             return Ok(MOCK_CHAT_SUMMARIES[idx].to_string());
+        }
+
+        if prompt.contains("divine message at the Temple") {
+            let choices = [
+                "I do not fully understand, but I feel it speaking to something I had nearly forgotten.",
+                "The words settle in me like stones in still water. I will carry this.",
+                "It is strange to hear the world answer. I thought it was not listening.",
+                "This changes something. I'm not sure what yet. But something.",
+            ];
+            return Ok(choices[rng.gen_range(0..choices.len())].to_string());
         }
         if prompt.contains("Narrator of Nephara") {
             let idx = rng.gen_range(0..MOCK_NARRATIVES.len());

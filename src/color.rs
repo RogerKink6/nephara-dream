@@ -30,6 +30,7 @@ pub fn tile_color(tile: TileType) -> Color {
         TileType::Well    => Color::Cyan,
         TileType::Meadow  => Color::BrightGreen,
         TileType::Home(_) => Color::Magenta,
+        TileType::Temple  => Color::BrightMagenta,
     }
 }
 
@@ -69,5 +70,6 @@ pub fn location_color(loc: &str) -> Color {
     else if loc.contains("Well")    { Color::Cyan }
     else if loc.contains("Meadow")  { Color::BrightGreen }
     else if loc.contains("Home")    { Color::Magenta }
+    else if loc.contains("Temple")  { Color::BrightMagenta }
     else                            { Color::BrightBlack }
 }

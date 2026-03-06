@@ -45,6 +45,8 @@ pub enum Action {
     Play,
     Move { destination: String },
     CastIntent { intent: String },
+    Pray { prayer: String },
+    ReadOracle,
     /// Fallback when requested action fails validation.
     Wander,
 }
@@ -65,7 +67,9 @@ impl Action {
             Action::Play        => "Play",
             Action::Move { .. } => "Move",
             Action::CastIntent { .. } => "Cast Intent",
-            Action::Wander      => "Wander",
+            Action::Pray { .. }       => "Pray",
+            Action::ReadOracle        => "Read Oracle",
+            Action::Wander            => "Wander",
         }
     }
 
@@ -74,6 +78,8 @@ impl Action {
             Action::Chat { target_name }       => format!("Chat with {}", target_name),
             Action::Move { destination }       => format!("Move > {}", destination),
             Action::CastIntent { intent }      => format!("Cast Intent: \"{}\"", intent),
+            Action::Pray { prayer }            => format!("Pray: \"{}\"", prayer),
+            Action::ReadOracle                 => "Read Oracle".to_string(),
             other => other.name().to_string(),
         }
     }
@@ -256,9 +262,11 @@ pub fn action_cfg_and_attr<'a>(action: &Action, config: &'a Config) -> (&'a Acti
         Action::Bathe       => (&config.actions.bathe,       ""),
         Action::Explore     => (&config.actions.explore,     "vigor"),
         Action::Play        => (&config.actions.play,        ""),
-        Action::Move { .. } => (&config.actions.rest,        ""), // placeholder; move has no needs
+        Action::Move { .. }      => (&config.actions.rest,        ""), // placeholder; move has no needs
         Action::CastIntent{ .. } => (&config.actions.cast_intent, "numen"),
-        Action::Wander      => (&config.actions.rest,        ""),
+        Action::Pray { .. }      => (&config.actions.pray,        ""),
+        Action::ReadOracle       => (&config.actions.read_oracle,  ""),
+        Action::Wander           => (&config.actions.rest,        ""),
     }
 }
 
@@ -364,6 +372,11 @@ pub fn action_from_name(name: &str, target: Option<&str>, intent: Option<&str>) 
                 Action::CastIntent { intent: i }
             }
         }
+        "pray" => {
+            let p = intent.unwrap_or("I offer this moment in stillness").to_string();
+            Action::Pray { prayer: p }
+        }
+        "read oracle" | "read_oracle" => Action::ReadOracle,
         other => {
             tracing::warn!("Unknown action '{}', defaulting to Wander", other);
             Action::Wander

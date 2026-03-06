@@ -195,6 +195,7 @@ pub struct Agent {
     pub daily_intentions:  Option<String>,
     pub life_story:        String,
     pub desires:           Option<String>,
+    pub oracle_pending:    bool,
 }
 
 impl Agent {
@@ -224,6 +225,7 @@ impl Agent {
             daily_intentions:  None,
             life_story:        String::new(),
             desires:           None,
+            oracle_pending:    false,
         }
     }
 

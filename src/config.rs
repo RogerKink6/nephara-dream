@@ -62,7 +62,9 @@ pub struct ActionsConfig {
     pub bathe:       ActionConfig,
     pub explore:     ActionConfig,
     pub play:        ActionConfig,
-    pub cast_intent: ActionConfig,
+    pub cast_intent:  ActionConfig,
+    pub pray:         ActionConfig,
+    pub read_oracle:  ActionConfig,
 }
 
 #[derive(Debug, Deserialize, Clone, Default)]
@@ -110,6 +112,7 @@ pub struct LlmConfig {
     pub smart_model:            Option<String>,
     pub narrator_max_tokens:    u32,
     pub desires_max_tokens:     u32,
+    pub oracle_max_tokens:      u32,
 }
 
 pub fn load(path: &str) -> Result<Config, Box<dyn std::error::Error + Send + Sync>> {

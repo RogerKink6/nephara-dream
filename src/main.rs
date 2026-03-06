@@ -157,7 +157,8 @@ async fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     info!("Run output: runs/{}/", run_log.run_id);
 
     // --- World ---
-    let mut world = World::new(souls, cfg.clone(), seed, rng, backend, smart_backend, run_log, cli.souls.clone());
+    let is_test_run = cli.llm == "mock";
+    let mut world = World::new(souls, cfg.clone(), seed, rng, backend, smart_backend, run_log, cli.souls.clone(), is_test_run);
     world.load_stories().await;
 
     let total_ticks = cli.ticks.unwrap_or(cfg.simulation.default_run_ticks);
@@ -214,14 +215,16 @@ async fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
             .collect()
     }).collect();
 
-    for (i, agent) in world.agents.iter().enumerate() {
-        log::append_journal(
-            &cli.souls,
-            agent.name(),
-            &world.run_log.run_id,
-            total_ticks,
-            &notable_by_agent[i],
-        );
+    if !world.is_test_run {
+        for (i, agent) in world.agents.iter().enumerate() {
+            log::append_journal(
+                &cli.souls,
+                agent.name(),
+                &world.run_log.run_id,
+                total_ticks,
+                &notable_by_agent[i],
+            );
+        }
     }
 
     let all_notable: Vec<String> = world.notable_events.iter().map(|(_, e)| e.clone()).collect();
