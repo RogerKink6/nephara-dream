@@ -99,6 +99,8 @@ pub struct LlmConfig {
     pub max_tokens:             u32,
     pub ollama_url:             String,
     pub interpreter_max_tokens: u32,
+    pub planning_max_tokens:    u32,
+    pub reflection_max_tokens:  u32,
 }
 
 pub fn load(path: &str) -> Result<Config, Box<dyn std::error::Error + Send + Sync>> {

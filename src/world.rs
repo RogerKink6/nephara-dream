@@ -92,6 +92,7 @@ pub struct World {
     pub seed:           u64,
     pub config:         Config,
     pub run_log:        RunLog,
+    pub souls_dir:      String,
     pub notable_events:      Vec<(usize, String)>,
     pub magic_count:         u32,
     pub magic_cast_this_day: Vec<bool>,
@@ -107,12 +108,13 @@ impl World {
     // -----------------------------------------------------------------------
 
     pub fn new(
-        seeds:   Vec<SoulSeed>,
-        config:  Config,
-        seed:    u64,
-        rng:     StdRng,
-        llm:     Arc<dyn LlmBackend>,
-        run_log: RunLog,
+        seeds:     Vec<SoulSeed>,
+        config:    Config,
+        seed:      u64,
+        rng:       StdRng,
+        llm:       Arc<dyn LlmBackend>,
+        run_log:   RunLog,
+        souls_dir: String,
     ) -> Self {
         let agents = seeds.iter().enumerate()
             .map(|(i, s)| Agent::from_soul(i, s, &config, home_pos_for(i)))
@@ -124,6 +126,7 @@ impl World {
             seed,
             config,
             run_log,
+            souls_dir,
             notable_events: Vec::new(),
             magic_count: 0,
             magic_cast_this_day: vec![false; seeds.len()],
@@ -131,6 +134,13 @@ impl World {
             rng,
             llm,
             llm_call_counter: 0,
+        }
+    }
+
+    /// Load life stories from file for each agent (called after construction).
+    pub async fn load_stories(&mut self) {
+        for agent in &mut self.agents {
+            agent.life_story = runlog::load_story(&self.souls_dir, &agent.identity.name);
         }
     }
 
@@ -146,7 +156,20 @@ impl World {
         let is_night    = tick_in_day >= self.config.time.night_start_tick;
         let tod         = runlog::time_of_day(tick_in_day, self.config.time.night_start_tick);
 
-        if tick_in_day == 0 { for flag in &mut self.magic_cast_this_day { *flag = false; } }
+        if tick_in_day == 0 {
+            // End-of-day reflection for the day that just ended
+            if tick > 0 {
+                let prev_day = day - 1;
+                for idx in 0..self.agents.len() {
+                    self.end_of_day_reflection(idx, prev_day).await?;
+                }
+            }
+            // Morning planning for the new day
+            for idx in 0..self.agents.len() {
+                self.morning_planning(idx, day).await?;
+            }
+            for flag in &mut self.magic_cast_this_day { *flag = false; }
+        }
 
         // Randomise agent order each tick
         let mut order: Vec<usize> = (0..self.agents.len()).collect();
@@ -685,8 +708,8 @@ impl World {
             nearby.join(", ")
         };
 
-        // Recent memory (newest first, up to 5)
-        let memory_str: Vec<String> = agent.memory.iter().take(5).cloned().collect();
+        // Recent memory (newest first, up to 8)
+        let memory_str: Vec<String> = agent.memory.iter().take(8).cloned().collect();
         let memory_block = if memory_str.is_empty() {
             "  (no memories yet)".to_string()
         } else {
@@ -731,6 +754,16 @@ impl World {
             String::new()
         };
 
+        let story_block = if agent.life_story.is_empty() {
+            "(your story is still unfolding — this is your first day)".to_string()
+        } else {
+            agent.life_story.clone()
+        };
+        let intentions_block = match &agent.daily_intentions {
+            Some(i) => i.clone(),
+            None    => "(the day is just beginning)".to_string(),
+        };
+
         let magic_nudge = if !magic_today {
             "\nMagic hasn't been spoken today. If anything stirs in you — a wish, a longing, a small hope — now is the time.\n".to_string()
         } else {
@@ -742,6 +775,12 @@ impl World {
 
 {backstory}
 {self_decl_block}{magic_block}
+YOUR STORY SO FAR:
+{story}
+
+TODAY'S INTENTION:
+{intentions}
+
 CURRENT STATE:
 - Location: {loc_name} — {loc_desc}
 - Time: Day {day}, {tod} (Tick {tick}){night_note}
@@ -776,6 +815,8 @@ Choose ONE action. Respond with ONLY a JSON object:
             backstory        = agent.identity.backstory,
             self_decl_block  = self_decl_block,
             magic_block      = magic_block,
+            story            = story_block,
+            intentions       = intentions_block,
             loc_name         = loc_name,
             loc_desc         = loc_desc,
             day              = day,
@@ -795,6 +836,102 @@ Choose ONE action. Respond with ONLY a JSON object:
             last_action_note = last_action_note,
             actions          = actions_str,
             magic_nudge      = magic_nudge,
+        )
+    }
+
+    // -----------------------------------------------------------------------
+    // Day-boundary LLM calls
+    // -----------------------------------------------------------------------
+
+    async fn morning_planning(
+        &mut self,
+        idx: usize,
+        day: u32,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let prompt     = self.build_intentions_prompt(idx, day);
+        let call_seed  = Some(self.seed.wrapping_add(self.llm_call_counter));
+        self.llm_call_counter += 1;
+        let llm        = Arc::clone(&self.llm);
+        let max_tokens = self.config.llm.planning_max_tokens;
+        let response   = llm.generate(&prompt, max_tokens, call_seed, None).await
+            .unwrap_or_else(|e| {
+                warn!("Planning LLM error for {}: {}", self.agents[idx].name(), e);
+                String::new()
+            });
+        let trimmed = response.trim().to_string();
+        if !trimmed.is_empty() {
+            debug!(target: "planning", agent = %self.agents[idx].name(), day = day,
+                   intention = %trimmed, "Morning intention set");
+            self.agents[idx].daily_intentions = Some(trimmed);
+        }
+        Ok(())
+    }
+
+    async fn end_of_day_reflection(
+        &mut self,
+        idx: usize,
+        day: u32,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let prompt     = self.build_reflection_prompt(idx, day);
+        let call_seed  = Some(self.seed.wrapping_add(self.llm_call_counter));
+        self.llm_call_counter += 1;
+        let llm        = Arc::clone(&self.llm);
+        let max_tokens = self.config.llm.reflection_max_tokens;
+        let response   = llm.generate(&prompt, max_tokens, call_seed, None).await
+            .unwrap_or_else(|e| {
+                warn!("Reflection LLM error for {}: {}", self.agents[idx].name(), e);
+                String::new()
+            });
+        let trimmed = response.trim().to_string();
+        if !trimmed.is_empty() {
+            let name      = self.agents[idx].name().to_string();
+            let souls_dir = self.souls_dir.clone();
+            let run_id    = self.run_log.run_id.clone();
+            debug!(target: "reflection", agent = %name, day = day, "Story updated");
+            self.agents[idx].life_story = trimmed.clone();
+            runlog::save_story(&souls_dir, &name, &trimmed);
+            runlog::append_day_journal(&souls_dir, &name, &run_id, day, &trimmed);
+        }
+        Ok(())
+    }
+
+    fn build_intentions_prompt(&self, idx: usize, day: u32) -> String {
+        let agent = &self.agents[idx];
+        let story = if agent.life_story.is_empty() {
+            "(your story is still unfolding — this is your first day)".to_string()
+        } else {
+            agent.life_story.clone()
+        };
+        format!(
+            "You are {name}. {personality}\n\nYour life so far:\n{story}\n\nIt is the start of Day {day}. Your current state: {needs}\n\nIn one or two sentences, what do you intend to accomplish today?\nWhat matters to you right now? Speak as yourself.",
+            name        = agent.identity.name,
+            personality = agent.identity.personality,
+            story       = story,
+            day         = day,
+            needs       = agent.needs.compact(),
+        )
+    }
+
+    fn build_reflection_prompt(&self, idx: usize, day: u32) -> String {
+        let agent = &self.agents[idx];
+        let story = if agent.life_story.is_empty() {
+            "(no story yet — this is your first reflection)".to_string()
+        } else {
+            agent.life_story.clone()
+        };
+        let today_mems = agent.today_memories(day);
+        let mem_block  = if today_mems.is_empty() {
+            "  - (nothing remembered from today)".to_string()
+        } else {
+            today_mems.iter().map(|m| format!("  - {}", m)).collect::<Vec<_>>().join("\n")
+        };
+        format!(
+            "You are {name}. {personality}\n\nYour ongoing life story:\n{story}\n\nWhat happened to you on Day {day}:\n{memories}\n\nIn 2-3 sentences, update your ongoing life story to include today.\nWrite in first person. Be specific about what happened and how it affected you.\nKeep the total to 2-3 sentences — this is a living summary, not a diary.",
+            name        = agent.identity.name,
+            personality = agent.identity.personality,
+            story       = story,
+            day         = day,
+            memories    = mem_block,
         )
     }
 

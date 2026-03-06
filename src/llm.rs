@@ -253,6 +253,28 @@ impl LlmBackend for MockBackend {
         let mut rng = self.rng.lock().expect("mock rng poisoned");
 
         // Detect prompt type by content — order matters
+        if prompt.contains("intend to accomplish today") {
+            let choices = [
+                "I intend to forage and rest by the river today.",
+                "Today I will seek company and perhaps cook a proper meal.",
+                "I mean to explore the forest and clear my head.",
+                "I want to practice fishing and spend time alone.",
+                "Today I'll rest and tend to myself.",
+            ];
+            return Ok(choices[rng.gen_range(0..choices.len())].to_string());
+        }
+
+        if prompt.contains("update your ongoing life story") {
+            let choices = [
+                "I wandered and foraged, finding small comforts in familiar places. The day passed quietly, as many do.",
+                "I spent time near the river, fishing without much luck. The stillness was welcome nonetheless.",
+                "I sought company today and found it briefly. The conversation lifted something in me.",
+                "I pushed myself too hard and felt it by evening. Rest came as a relief.",
+                "Today held small magic — I spoke a wish aloud and felt the world shift slightly.",
+            ];
+            return Ok(choices[rng.gen_range(0..choices.len())].to_string());
+        }
+
         if prompt.contains("primary_effect") {
             let idx = rng.gen_range(0..MOCK_INTERPRETER_RESPONSES.len());
             return Ok(MOCK_INTERPRETER_RESPONSES[idx].to_string());

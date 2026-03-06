@@ -105,3 +105,5 @@ temperature            = 0.7
 max_tokens             = 150
 ollama_url             = "http://localhost:11434"
 interpreter_max_tokens = 300
+planning_max_tokens    = 60
+reflection_max_tokens  = 200

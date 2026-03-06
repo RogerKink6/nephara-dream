@@ -163,6 +163,33 @@ pub fn write_state_dump(
 }
 
 // ---------------------------------------------------------------------------
+// Story persistence
+// ---------------------------------------------------------------------------
+
+pub fn load_story(souls_dir: &str, name: &str) -> String {
+    let path = format!("{}/{}.story.md", souls_dir, name.to_lowercase());
+    fs::read_to_string(&path).unwrap_or_default()
+}
+
+pub fn save_story(souls_dir: &str, name: &str, story: &str) {
+    let path = format!("{}/{}.story.md", souls_dir, name.to_lowercase());
+    if let Err(e) = fs::write(&path, story) {
+        warn!("Could not save story for {}: {}", name, e);
+    }
+}
+
+pub fn append_day_journal(souls_dir: &str, agent_name: &str, run_id: &str, day: u32, story: &str) {
+    let path  = format!("{}/{}.journal.md", souls_dir, agent_name.to_lowercase());
+    let date  = Local::now().format("%Y-%m-%d");
+    let entry = format!("\n## Run {} Day {} — {}\n{}\n", run_id, day, date, story);
+    let file  = OpenOptions::new().create(true).append(true).open(&path);
+    match file {
+        Ok(mut f) => { let _ = f.write_all(entry.as_bytes()); }
+        Err(e)    => warn!("Could not append day journal for {}: {}", agent_name, e),
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Journal append
 // ---------------------------------------------------------------------------
 

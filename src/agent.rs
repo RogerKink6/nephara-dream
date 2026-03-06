@@ -192,6 +192,8 @@ pub struct Agent {
     pub busy_ticks:        u32,
     /// Energy restored per tick while sleeping (None when not sleeping).
     pub sleep_energy_tick: Option<f32>,
+    pub daily_intentions:  Option<String>,
+    pub life_story:        String,
 }
 
 impl Agent {
@@ -218,11 +220,22 @@ impl Agent {
             memory:            VecDeque::new(),
             busy_ticks:        0,
             sleep_energy_tick: None,
+            daily_intentions:  None,
+            life_story:        String::new(),
         }
     }
 
     pub fn name(&self) -> &str { &self.identity.name }
     pub fn is_busy(&self) -> bool { self.busy_ticks > 0 }
+
+    /// Returns memory entries that belong to the given day.
+    pub fn today_memories(&self, day: u32) -> Vec<&str> {
+        let tag = format!("| Day {} |", day);
+        self.memory.iter()
+            .filter(|m| m.contains(&tag))
+            .map(|m| m.as_str())
+            .collect()
+    }
 
     pub fn push_memory(&mut self, entry: String, max_size: usize) {
         self.memory.push_front(entry);

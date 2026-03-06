@@ -135,7 +135,8 @@ async fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     info!("Run output: runs/{}/", run_log.run_id);
 
     // --- World ---
-    let mut world = World::new(souls, cfg.clone(), seed, rng, backend, run_log);
+    let mut world = World::new(souls, cfg.clone(), seed, rng, backend, run_log, cli.souls.clone());
+    world.load_stories().await;
 
     let total_ticks = cli.ticks.unwrap_or(cfg.simulation.default_run_ticks);
 
