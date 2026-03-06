@@ -2,9 +2,28 @@ use std::fs::{self, OpenOptions};
 use std::io::Write as IoWrite;
 
 use chrono::Local;
+use colored::Colorize;
 use tracing::warn;
 
 use crate::agent::Agent;
+use crate::color;
+
+// ---------------------------------------------------------------------------
+// ANSI stripping — used to write plain text to log file
+// ---------------------------------------------------------------------------
+
+fn strip_ansi(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut chars = s.chars();
+    while let Some(c) = chars.next() {
+        if c == '\x1b' {
+            for c2 in chars.by_ref() { if c2 == 'm' { break; } }
+        } else {
+            out.push(c);
+        }
+    }
+    out
+}
 
 // ---------------------------------------------------------------------------
 // Run directory setup
@@ -25,22 +44,21 @@ impl RunLog {
         Ok(RunLog { run_id, log_path })
     }
 
+    /// Print the colored string to stdout; write plain text to file.
     pub fn write_line(&self, line: &str) {
-        // Print to stdout
         println!("{}", line);
 
-        // Append to file
+        let plain = strip_ansi(line);
         if let Ok(mut f) = OpenOptions::new()
             .create(true)
             .append(true)
             .open(&self.log_path)
         {
-            let _ = writeln!(f, "{}", line);
+            let _ = writeln!(f, "{}", plain);
         } else {
             warn!("Could not write to tick log file");
         }
     }
-
 }
 
 // ---------------------------------------------------------------------------
@@ -48,14 +66,15 @@ impl RunLog {
 // ---------------------------------------------------------------------------
 
 pub fn tick_header(tick: u32, day: u32, time_of_day: &str) -> String {
-    format!("\n=== TICK {} | Day {} | {} ===", tick, day, time_of_day)
+    let s = format!("\n=== TICK {} | Day {} | {} ===", tick, day, time_of_day);
+    format!("{}", s.color(colored::Color::BrightBlue).bold())
 }
 
 pub fn time_of_day(tick_in_day: u32, night_start: u32) -> &'static str {
     if tick_in_day < 8             { "Dawn" }
-    else if tick_in_day < 16       { "Morning" }
-    else if tick_in_day < night_start      { "Afternoon" }
-    else if tick_in_day < night_start + 8  { "Evening" }
+    else if tick_in_day < 16      { "Morning" }
+    else if tick_in_day < night_start     { "Afternoon" }
+    else if tick_in_day < night_start + 8 { "Evening" }
     else                           { "Night" }
 }
 
@@ -64,11 +83,20 @@ pub fn time_of_day(tick_in_day: u32, night_start: u32) -> &'static str {
 // ---------------------------------------------------------------------------
 
 pub fn needs_footer(agents: &[Agent]) -> String {
-    let parts: Vec<String> = agents
-        .iter()
-        .map(|a| format!("{} [{}]", a.name(), a.needs.compact()))
-        .collect();
+    let parts: Vec<String> = agents.iter().map(|a| {
+        let h = format_need("H", a.needs.hunger);
+        let e = format_need("E", a.needs.energy);
+        let f = format_need("F", a.needs.fun);
+        let s = format_need("S", a.needs.social);
+        let y = format_need("Y", a.needs.hygiene);
+        format!("{} [{} {} {} {} {}]", a.name(), h, e, f, s, y)
+    }).collect();
     format!("  Needs: {}", parts.join(" | "))
+}
+
+fn format_need(label: &str, value: f32) -> String {
+    let c = color::needs_color(value);
+    format!("{}", format!("{}:{:.0}", label, value).color(c))
 }
 
 // ---------------------------------------------------------------------------
@@ -76,15 +104,44 @@ pub fn needs_footer(agents: &[Agent]) -> String {
 // ---------------------------------------------------------------------------
 
 pub struct TickEntry {
-    pub agent_name:   String,
-    pub location:     String,
-    pub action_line:  String,   // "Chat with Elara | Heart 15 vs DC 8 | Success"
-    pub outcome_line: String,   // "> Warm conversation... [Social +20, Fun +8]"
+    pub agent_id:           usize,
+    pub agent_pos:          (u8, u8),
+    pub agent_name:         String,
+    pub location:           String,
+    pub action_line:        String,
+    pub outcome_line:       String,
+    /// The outcome tier label (e.g. "Success"), present only when a d20 check was made.
+    pub outcome_tier_label: Option<String>,
 }
 
 impl TickEntry {
     pub fn format(&self) -> Vec<String> {
-        let header = format!("  [{:<10}] @ {:<16} | {}", self.agent_name, self.location, self.action_line);
+        let agent_c = color::agent_color(self.agent_id);
+        let loc_c   = color::location_color(&self.location);
+
+        // Pad BEFORE colorizing so visual alignment is preserved in the terminal.
+        let name_padded = format!("{:<10}", self.agent_name);
+        let loc_padded  = format!("{:<16}", self.location);
+
+        let colored_name = format!("{}", name_padded.color(agent_c).bold());
+        let colored_loc  = format!("{}", loc_padded.color(loc_c));
+        let pos_str      = format!("({},{})", self.agent_pos.0, self.agent_pos.1);
+
+        // Color the tier label at the end of action_line when present.
+        let colored_action_line = if let Some(ref tier) = self.outcome_tier_label {
+            let suffix = format!(" | {}", tier);
+            if self.action_line.ends_with(&suffix) {
+                let prefix = &self.action_line[..self.action_line.len() - suffix.len()];
+                format!("{} | {}", prefix, format!("{}", tier.color(color::tier_color(tier))))
+            } else {
+                self.action_line.clone()
+            }
+        } else {
+            self.action_line.clone()
+        };
+
+        let header = format!("  [{}] @ {} {} | {}",
+            colored_name, colored_loc, pos_str, colored_action_line);
         let mut lines = vec![header];
 
         if self.outcome_line.is_empty() {

@@ -10,6 +10,12 @@ pub struct Config {
     pub memory:     MemoryConfig,
     pub simulation: SimulationConfig,
     pub llm:        LlmConfig,
+    pub world:      WorldConfig,
+}
+
+#[derive(Debug, Deserialize, Clone)]
+pub struct WorldConfig {
+    pub resource_respawn_ticks: u32,
 }
 
 #[derive(Debug, Deserialize, Clone)]

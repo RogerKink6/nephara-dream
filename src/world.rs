@@ -1,3 +1,4 @@
+use colored::Colorize;
 use rand::rngs::StdRng;
 use rand::seq::SliceRandom;
 use std::collections::VecDeque;
@@ -5,7 +6,8 @@ use std::sync::Arc;
 use tracing::{debug, warn};
 
 use crate::action::{self, Action, OutcomeTier, Resolution};
-use crate::agent::Agent;
+use crate::agent::{Agent, NeedChanges};
+use crate::color;
 use crate::config::Config;
 use crate::llm::LlmBackend;
 use crate::log::{self as runlog, RunLog, TickEntry};
@@ -16,15 +18,15 @@ use crate::soul::SoulSeed;
 // Grid constants
 // ---------------------------------------------------------------------------
 
-pub const GRID_W: usize = 24;
-pub const GRID_H: usize = 12;
+pub const GRID_W: usize = 32;
+pub const GRID_H: usize = 32;
 
 /// Home positions per agent index (x=col, y=row).
 /// Agents are sorted alphabetically: Elara=0, Rowan=1, Thane=2.
 pub const HOME_POSITIONS: &[(u8, u8)] = &[
-    (1, 4),   // agent 0
-    (1, 7),   // agent 1
-    (16, 8),  // agent 2
+    (5, 17),   // agent 0: Elara
+    (8, 22),   // agent 1: Rowan
+    (19, 22),  // agent 2: Thane
 ];
 
 fn home_pos_for(idx: usize) -> (u8, u8) {
@@ -42,6 +44,8 @@ pub enum TileType {
     River,
     Square,
     Tavern,
+    Well,
+    Meadow,
     Home(usize),
 }
 
@@ -52,15 +56,133 @@ fn tile_char(tile: TileType) -> char {
         TileType::River   => '~',
         TileType::Square  => 'S',
         TileType::Tavern  => 'T',
+        TileType::Well    => 'W',
+        TileType::Meadow  => 'M',
         TileType::Home(_) => 'h',
     }
+}
+
+// ---------------------------------------------------------------------------
+// Resource nodes
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum ResourceKind {
+    BerryBush,
+    FishSchool,
+    Campfire,
+    HerbPatch,
+}
+
+pub struct ResourceNode {
+    pub kind:         ResourceKind,
+    pub pos:          (u8, u8),
+    pub charges:      u32,
+    pub max_charges:  u32,
+    pub respawn_ticks: u32,
+}
+
+impl ResourceNode {
+    pub fn is_available(&self) -> bool {
+        self.charges > 0
+    }
+
+    pub fn deplete(&mut self, respawn_ticks: u32) {
+        if self.charges > 0 {
+            self.charges -= 1;
+            if self.charges == 0 {
+                self.respawn_ticks = respawn_ticks;
+            }
+        }
+    }
+
+    pub fn tick_respawn(&mut self) {
+        if self.charges < self.max_charges && self.respawn_ticks > 0 {
+            self.respawn_ticks -= 1;
+            if self.respawn_ticks == 0 {
+                self.charges = self.max_charges;
+            }
+        }
+    }
+
+    pub fn map_char(&self) -> char {
+        if self.is_available() {
+            match self.kind {
+                ResourceKind::BerryBush  => '✿',
+                ResourceKind::FishSchool => '≋',
+                ResourceKind::Campfire   => '✦',
+                ResourceKind::HerbPatch  => '✜',
+            }
+        } else {
+            '·'
+        }
+    }
+
+    pub fn node_color(&self) -> colored::Color {
+        if self.is_available() {
+            match self.kind {
+                ResourceKind::BerryBush  => colored::Color::BrightMagenta,
+                ResourceKind::FishSchool => colored::Color::BrightCyan,
+                ResourceKind::Campfire   => colored::Color::BrightRed,
+                ResourceKind::HerbPatch  => colored::Color::BrightGreen,
+            }
+        } else {
+            colored::Color::BrightBlack
+        }
+    }
+}
+
+fn build_resource_nodes() -> Vec<ResourceNode> {
+    let mut nodes = Vec::new();
+
+    for &pos in &[(3u8, 3u8), (8, 5), (12, 7)] {
+        nodes.push(ResourceNode {
+            kind: ResourceKind::BerryBush,
+            pos,
+            charges: 3,
+            max_charges: 3,
+            respawn_ticks: 0,
+        });
+    }
+
+    for &pos in &[(16u8, 6u8), (16, 14)] {
+        nodes.push(ResourceNode {
+            kind: ResourceKind::FishSchool,
+            pos,
+            charges: 4,
+            max_charges: 4,
+            respawn_ticks: 0,
+        });
+    }
+
+    for &pos in &[(5u8, 17u8), (8, 22), (19, 22)] {
+        nodes.push(ResourceNode {
+            kind: ResourceKind::Campfire,
+            pos,
+            charges: 5,
+            max_charges: 5,
+            respawn_ticks: 0,
+        });
+    }
+
+    for &pos in &[(5u8, 7u8), (10, 4)] {
+        nodes.push(ResourceNode {
+            kind: ResourceKind::HerbPatch,
+            pos,
+            charges: 2,
+            max_charges: 2,
+            respawn_ticks: 0,
+        });
+    }
+
+    nodes
 }
 
 // ---------------------------------------------------------------------------
 // Helper: visible state label for nearby agents
 // ---------------------------------------------------------------------------
 
-fn agent_visible_state<'a>(a: &Agent, config: &Config) -> Option<&'static str> {
+fn agent_visible_state(a: &Agent, config: &Config) -> Option<&'static str> {
     let t = &config.needs.thresholds;
     if a.is_busy()                       { return Some("busy"); }
     if a.needs.energy < t.penalty_severe { return Some("exhausted"); }
@@ -87,20 +209,21 @@ pub struct TickResult {
 // ---------------------------------------------------------------------------
 
 pub struct World {
-    pub tick_num:       u32,
-    pub agents:         Vec<Agent>,
-    pub seed:           u64,
-    pub config:         Config,
-    pub run_log:        RunLog,
-    pub souls_dir:      String,
+    pub tick_num:            u32,
+    pub agents:              Vec<Agent>,
+    pub seed:                u64,
+    pub config:              Config,
+    pub run_log:             RunLog,
+    pub souls_dir:           String,
     pub notable_events:      Vec<(usize, String)>,
     pub magic_count:         u32,
     pub magic_cast_this_day: Vec<bool>,
-    grid:               [[TileType; GRID_W]; GRID_H],
-    rng:                StdRng,
-    llm:                Arc<dyn LlmBackend>,
-    llm_smart:          Arc<dyn LlmBackend>,
-    llm_call_counter:   u64,
+    pub resource_nodes:      Vec<ResourceNode>,
+    grid:                    [[TileType; GRID_W]; GRID_H],
+    rng:                     StdRng,
+    llm:                     Arc<dyn LlmBackend>,
+    llm_smart:               Arc<dyn LlmBackend>,
+    llm_call_counter:        u64,
 }
 
 impl World {
@@ -121,7 +244,8 @@ impl World {
         let agents = seeds.iter().enumerate()
             .map(|(i, s)| Agent::from_soul(i, s, &config, home_pos_for(i)))
             .collect();
-        let grid = build_grid();
+        let grid           = build_grid();
+        let resource_nodes = build_resource_nodes();
         World {
             tick_num: 0,
             agents,
@@ -132,6 +256,7 @@ impl World {
             notable_events: Vec::new(),
             magic_count: 0,
             magic_cast_this_day: vec![false; seeds.len()],
+            resource_nodes,
             grid,
             rng,
             llm,
@@ -160,7 +285,6 @@ impl World {
         let tod         = runlog::time_of_day(tick_in_day, self.config.time.night_start_tick);
 
         if tick_in_day == 0 {
-            // End-of-day reflection and desires for the day that just ended
             if tick > 0 {
                 let prev_day = day - 1;
                 for idx in 0..self.agents.len() {
@@ -170,14 +294,12 @@ impl World {
                     self.end_of_day_desires(idx, prev_day).await?;
                 }
             }
-            // Morning planning for the new day
             for idx in 0..self.agents.len() {
                 self.morning_planning(idx, day).await?;
             }
             for flag in &mut self.magic_cast_this_day { *flag = false; }
         }
 
-        // Randomise agent order each tick
         let mut order: Vec<usize> = (0..self.agents.len()).collect();
         order.shuffle(&mut self.rng);
 
@@ -191,6 +313,11 @@ impl World {
         // Passive need decay
         for agent in &mut self.agents {
             agent.needs.apply_decay(&self.config.needs.decay_per_tick);
+        }
+
+        // Resource node respawn countdown
+        for node in &mut self.resource_nodes {
+            node.tick_respawn();
         }
 
         self.tick_num += 1;
@@ -222,10 +349,13 @@ impl World {
             let tile       = self.tile_at(self.agents[idx].pos);
             let loc_name   = self.tile_name(tile);
             return Ok(TickEntry {
-                agent_name:  self.agents[idx].name().to_string(),
-                location:    loc_name,
-                action_line: format!("(busy — {} tick{} remaining)", ticks_left, if ticks_left == 1 { "" } else { "s" }),
-                outcome_line: String::new(),
+                agent_id:           idx,
+                agent_pos:          self.agents[idx].pos,
+                agent_name:         self.agents[idx].name().to_string(),
+                location:           loc_name,
+                action_line:        format!("(busy — {} tick{} remaining)", ticks_left, if ticks_left == 1 { "" } else { "s" }),
+                outcome_line:       String::new(),
+                outcome_tier_label: None,
             });
         }
 
@@ -237,12 +367,10 @@ impl World {
         } else if self.agents[idx].needs.energy < self.config.needs.thresholds.forced_action {
             (Action::Move { destination: "home".to_string() }, None, None)
         } else {
-            // Build schema from available canonical names
             let canonical = self.available_canonical_names(idx);
             let canonical_strs: Vec<&str> = canonical.iter().copied().collect();
             let schema = action::build_action_schema(&canonical_strs);
 
-            // Build prompt and ask LLM
             let prompt    = self.build_prompt(idx, tick, day, is_night, tod, self.magic_cast_this_day[idx]);
             let call_seed = Some(self.seed.wrapping_add(self.llm_call_counter));
             self.llm_call_counter += 1;
@@ -258,7 +386,6 @@ impl World {
             action::parse_response(&raw)
         };
 
-        // --- Validate and resolve ---
         let action   = self.validate(idx, action);
         let tile     = self.tile_at(self.agents[idx].pos);
         let loc_name = self.tile_name(tile);
@@ -325,12 +452,13 @@ impl World {
     fn wander_action(&self, idx: usize) -> Action {
         let pos          = self.agents[idx].pos;
         let current_tile = self.tile_at(pos);
-        // Pick a destination that isn't the current tile type
         let options = [
             ("Forest",         TileType::Forest),
             ("River",          TileType::River),
             ("Village Square", TileType::Square),
             ("Tavern",         TileType::Tavern),
+            ("Village Well",   TileType::Well),
+            ("Eastern Meadow", TileType::Meadow),
         ];
         let valid: Vec<_> = options.iter()
             .filter(|(_, t)| *t != current_tile)
@@ -371,10 +499,13 @@ impl World {
                     let buf = self.config.memory.buffer_size;
                     self.agents[idx].push_memory(mem, buf);
                     return Ok(TickEntry {
-                        agent_name:   self.agents[idx].name().to_string(),
-                        location:     loc_name.to_string(),
-                        action_line:  format!("Move > {} (arrived)", arrived),
-                        outcome_line: format!("{} is already at {}.", self.agents[idx].name(), arrived),
+                        agent_id:           idx,
+                        agent_pos:          self.agents[idx].pos,
+                        agent_name:         self.agents[idx].name().to_string(),
+                        location:           loc_name.to_string(),
+                        action_line:        format!("Move > {} (arrived)", arrived),
+                        outcome_line:       format!("{} is already at {}.", self.agents[idx].name(), arrived),
+                        outcome_tier_label: None,
                     });
                 }
 
@@ -385,17 +516,23 @@ impl World {
                     let buf = self.config.memory.buffer_size;
                     self.agents[idx].push_memory(mem, buf);
                     Ok(TickEntry {
-                        agent_name:   self.agents[idx].name().to_string(),
-                        location:     loc_name.to_string(),
-                        action_line:  format!("Move → {}", destination),
-                        outcome_line: format!("{} moves toward {}.", self.agents[idx].name(), destination),
+                        agent_id:           idx,
+                        agent_pos:          self.agents[idx].pos,
+                        agent_name:         self.agents[idx].name().to_string(),
+                        location:           loc_name.to_string(),
+                        action_line:        format!("Move → {}", destination),
+                        outcome_line:       format!("{} moves toward {}.", self.agents[idx].name(), destination),
+                        outcome_tier_label: None,
                     })
                 } else {
                     Ok(TickEntry {
-                        agent_name:   self.agents[idx].name().to_string(),
-                        location:     loc_name.to_string(),
-                        action_line:  format!("Move → {} (unreachable)", destination),
-                        outcome_line: format!("{} wanders, unable to find {}.", self.agents[idx].name(), destination),
+                        agent_id:           idx,
+                        agent_pos:          self.agents[idx].pos,
+                        agent_name:         self.agents[idx].name().to_string(),
+                        location:           loc_name.to_string(),
+                        action_line:        format!("Move → {} (unreachable)", destination),
+                        outcome_line:       format!("{} wanders, unable to find {}.", self.agents[idx].name(), destination),
+                        outcome_tier_label: None,
                     })
                 }
             }
@@ -422,10 +559,13 @@ impl World {
                 let buf = self.config.memory.buffer_size;
                 self.agents[idx].push_memory(mem, buf);
                 Ok(TickEntry {
-                    agent_name:   self.agents[idx].name().to_string(),
-                    location:     loc_name.to_string(),
-                    action_line:  "Sleep".to_string(),
-                    outcome_line: format!("{} falls into a deep sleep.", self.agents[idx].name()),
+                    agent_id:           idx,
+                    agent_pos:          self.agents[idx].pos,
+                    agent_name:         self.agents[idx].name().to_string(),
+                    location:           loc_name.to_string(),
+                    action_line:        "Sleep".to_string(),
+                    outcome_line:       format!("{} falls into a deep sleep.", self.agents[idx].name()),
+                    outcome_tier_label: None,
                 })
             }
 
@@ -442,7 +582,25 @@ impl World {
                     self.agents[idx].busy_ticks        = res.duration - 1;
                     self.agents[idx].sleep_energy_tick = None;
                 }
-                self.agents[idx].needs.apply(&res.need_changes);
+
+                let pos = self.agents[idx].pos;
+                let mut need_changes = res.need_changes.clone();
+
+                // Resource node bonus (Success/CriticalSuccess only)
+                if matches!(res.tier, OutcomeTier::Success | OutcomeTier::CriticalSuccess) {
+                    let node_idx = self.find_resource_node(pos, &action);
+                    if let Some(ni) = node_idx {
+                        let respawn = self.config.world.resource_respawn_ticks;
+                        self.apply_resource_at(ni, &mut need_changes, respawn);
+                    }
+                }
+
+                // Well + Bathe override: more effective hygiene restoration
+                if matches!(&action, Action::Bathe) && self.tile_at(pos) == TileType::Well {
+                    need_changes.hygiene = Some(80.0 * res.tier.multiplier());
+                }
+
+                self.agents[idx].needs.apply(&need_changes);
 
                 let nearby: Vec<String> = self.agents.iter()
                     .filter(|a| a.id != idx && Self::chebyshev_dist(a.pos, self.agents[idx].pos) <= 1)
@@ -468,8 +626,8 @@ impl World {
                     _ => self.narrative_for(&res, idx),
                 };
 
-                let check_line   = res.check_line();
-                let action_line  = if check_line.is_empty() {
+                let check_line  = res.check_line();
+                let action_line = if check_line.is_empty() {
                     res.action.display()
                 } else {
                     format!("{} | {}", res.action.display(), check_line)
@@ -486,20 +644,61 @@ impl World {
                     self.notable_events.push((idx, ev));
                 }
 
-                let needs_note = res.need_changes.describe();
+                let needs_note = need_changes.describe();
                 let mem = format!("Tick {tick} | Day {day} | {tod} | {} — {} [{}]",
                     res.action.name(), res.tier.label(), needs_note);
                 let buf = self.config.memory.buffer_size;
                 self.agents[idx].push_memory(mem, buf);
 
+                let tier_label = res.tier.label().to_string();
                 Ok(TickEntry {
-                    agent_name:  self.agents[idx].name().to_string(),
-                    location:    loc_name.to_string(),
+                    agent_id:           idx,
+                    agent_pos:          self.agents[idx].pos,
+                    agent_name:         self.agents[idx].name().to_string(),
+                    location:           loc_name.to_string(),
                     action_line,
-                    outcome_line: narrative,
+                    outcome_line:       narrative,
+                    outcome_tier_label: if res.dc > 0 { Some(tier_label) } else { None },
                 })
             }
         }
+    }
+
+    // -----------------------------------------------------------------------
+    // Resource node helpers
+    // -----------------------------------------------------------------------
+
+    /// Find a charged resource node at `pos` compatible with `action`. Returns its index.
+    fn find_resource_node(&self, pos: (u8, u8), action: &Action) -> Option<usize> {
+        let compatible: &[ResourceKind] = match action {
+            Action::Forage => &[ResourceKind::BerryBush, ResourceKind::HerbPatch],
+            Action::Fish   => &[ResourceKind::FishSchool],
+            Action::Cook   => &[ResourceKind::Campfire],
+            _              => return None,
+        };
+        self.resource_nodes.iter().position(|n| {
+            n.pos == pos && compatible.contains(&n.kind) && n.is_available()
+        })
+    }
+
+    /// Apply the resource bonus to `need_changes` and deplete the node.
+    fn apply_resource_at(&mut self, node_idx: usize, need_changes: &mut NeedChanges, respawn_ticks: u32) {
+        match self.resource_nodes[node_idx].kind {
+            ResourceKind::BerryBush => {
+                need_changes.hunger = Some(need_changes.hunger.unwrap_or(0.0) + 15.0);
+            }
+            ResourceKind::FishSchool => {
+                need_changes.hunger = Some(need_changes.hunger.unwrap_or(0.0) + 20.0);
+            }
+            ResourceKind::Campfire => {
+                need_changes.fun = Some(need_changes.fun.unwrap_or(0.0) + 10.0);
+            }
+            ResourceKind::HerbPatch => {
+                need_changes.fun     = Some(need_changes.fun    .unwrap_or(0.0) + 10.0);
+                need_changes.hygiene = Some(need_changes.hygiene.unwrap_or(0.0) + 5.0);
+            }
+        }
+        self.resource_nodes[node_idx].deplete(respawn_ticks);
     }
 
     // -----------------------------------------------------------------------
@@ -521,10 +720,13 @@ impl World {
             Some(i) => i,
             None    => {
                 return Ok(TickEntry {
-                    agent_name:  self.agents[idx].name().to_string(),
-                    location:    loc_name.to_string(),
-                    action_line: format!("Chat with {}", target),
-                    outcome_line: format!("{} looks around for {} but finds no one.", self.agents[idx].name(), target),
+                    agent_id:           idx,
+                    agent_pos:          self.agents[idx].pos,
+                    agent_name:         self.agents[idx].name().to_string(),
+                    location:           loc_name.to_string(),
+                    action_line:        format!("Chat with {}", target),
+                    outcome_line:       format!("{} looks around for {} but finds no one.", self.agents[idx].name(), target),
+                    outcome_tier_label: None,
                 });
             }
         };
@@ -563,11 +765,15 @@ impl World {
         self.agents[target_idx].push_memory(mem_b, buf);
 
         let check_line = res.check_line();
+        let tier_label = res.tier.label().to_string();
         Ok(TickEntry {
-            agent_name:  self.agents[idx].name().to_string(),
-            location:    loc_name.to_string(),
-            action_line: format!("Chat with {} | {}", self.agents[target_idx].name(), check_line),
-            outcome_line: format!("{} [{}]", summary, changes.describe()),
+            agent_id:           idx,
+            agent_pos:          self.agents[idx].pos,
+            agent_name:         self.agents[idx].name().to_string(),
+            location:           loc_name.to_string(),
+            action_line:        format!("Chat with {} | {}", self.agents[target_idx].name(), check_line),
+            outcome_line:       format!("{} [{}]", summary, changes.describe()),
+            outcome_tier_label: if res.dc > 0 { Some(tier_label) } else { None },
         })
     }
 
@@ -618,7 +824,6 @@ impl World {
         self.magic_count += 1;
         self.magic_cast_this_day[idx] = true;
 
-        // Ambient effect: nearby non-busy agents get a social+fun bonus
         let ambient_fun    = (need_changes.fun.unwrap_or(0.0) * 0.5).min(8.0).max(0.0);
         let ambient_social = 4.0_f32;
         let ambient_touched = if ambient_fun > 0.0 || ambient_social > 0.0 {
@@ -682,10 +887,13 @@ impl World {
         };
 
         Ok(TickEntry {
-            agent_name:  self.agents[idx].name().to_string(),
-            location:    loc_name.to_string(),
-            action_line: format!("Cast Intent: \"{}\"", intent),
-            outcome_line: full_outcome,
+            agent_id:           idx,
+            agent_pos:          self.agents[idx].pos,
+            agent_name:         self.agents[idx].name().to_string(),
+            location:           loc_name.to_string(),
+            action_line:        format!("Cast Intent: \"{}\"", intent),
+            outcome_line:       full_outcome,
+            outcome_tier_label: None,
         })
     }
 
@@ -700,7 +908,6 @@ impl World {
         let loc_name = self.tile_name(tile);
         let loc_desc = self.tile_desc(tile);
 
-        // Nearby agents (Chebyshev distance ≤ 1)
         let nearby: Vec<String> = self.agents.iter()
             .filter(|a| a.id != idx && Self::chebyshev_dist(a.pos, pos) <= 1)
             .map(|a| {
@@ -717,7 +924,6 @@ impl World {
             nearby.join(", ")
         };
 
-        // Recent memory (newest first, up to 8)
         let memory_str: Vec<String> = agent.memory.iter().take(8).cloned().collect();
         let memory_block = if memory_str.is_empty() {
             "  (no memories yet)".to_string()
@@ -725,13 +931,11 @@ impl World {
             memory_str.iter().map(|m| format!("  - {}", m)).collect::<Vec<_>>().join("\n")
         };
 
-        // Last action note for anti-repetition
         let last_action_note = match agent.memory.front() {
             Some(m) if !m.is_empty() => format!("\nLast action: {}", m),
             _ => String::new(),
         };
 
-        // Need warnings
         let warnings     = agent.need_warnings(&self.config);
         let warnings_str = if warnings.is_empty() {
             String::new()
@@ -739,13 +943,9 @@ impl World {
             format!("\nWARNINGS:\n{}", warnings.iter().map(|w| format!("  ! {}", w)).collect::<Vec<_>>().join("\n"))
         };
 
-        // 5×5 viewport
-        let viewport = self.build_viewport(pos, 2);
-
-        // Region distances
+        let viewport    = self.build_viewport(pos, 2);
         let region_note = self.build_region_distances(pos, tile);
 
-        // Available actions (human-readable, annotated)
         let available   = self.available_actions(idx);
         let actions_str = available.iter().enumerate()
             .map(|(i, a)| format!("  {}. {}", i + 1, a))
@@ -804,6 +1004,7 @@ NEARBY: {nearby}
 
 VIEWPORT (you are [X]):
 {viewport}
+(legend: F=Forest ~=River S=Square T=Tavern W=Well M=Meadow h=Home X=you)
 {region_note}
 
 RECENT MEMORY (newest first):
@@ -1129,9 +1330,9 @@ Do not use quotation marks. Do not use names in the sentence. Just the summary."
     // -----------------------------------------------------------------------
 
     fn available_actions(&self, idx: usize) -> Vec<String> {
-        let tile    = self.tile_at(self.agents[idx].pos);
-        let pos     = self.agents[idx].pos;
-        let mut v   = Vec::new();
+        let tile  = self.tile_at(self.agents[idx].pos);
+        let pos   = self.agents[idx].pos;
+        let mut v = Vec::new();
 
         if self.tile_allows(tile, "eat")      { v.push("eat (always works)".to_string()); }
         if self.tile_allows(tile, "cook")     { v.push("cook (Wit check)".to_string()); }
@@ -1144,19 +1345,19 @@ Do not use quotation marks. Do not use names in the sentence. Just the summary."
         if self.tile_allows(tile, "explore")  { v.push("explore (Vigor check)".to_string()); }
         if self.tile_allows(tile, "play")     { v.push("play (always works)".to_string()); }
 
-        // Chat: nearby non-busy agents (Chebyshev ≤ 1)
         for a in &self.agents {
             if a.id != idx && Self::chebyshev_dist(a.pos, pos) <= 1 && !a.is_busy() {
                 v.push(format!("chat (Heart check) — target: {}", a.name()));
             }
         }
 
-        // Move: named regions with distances
         let regions: &[(&str, TileType)] = &[
             ("Forest",         TileType::Forest),
             ("River",          TileType::River),
             ("Village Square", TileType::Square),
             ("Tavern",         TileType::Tavern),
+            ("Village Well",   TileType::Well),
+            ("Eastern Meadow", TileType::Meadow),
             ("home",           TileType::Home(idx)),
         ];
         for (name, ttype) in regions {
@@ -1168,7 +1369,6 @@ Do not use quotation marks. Do not use names in the sentence. Just the summary."
             }
         }
 
-        // cast_intent: always available, hint based on Numen
         let numen = self.agents[idx].attributes.numen;
         let numen_hint = if numen >= 6 { " (strong affinity)" } else if numen >= 4 { "" } else { " (difficult)" };
         v.push(format!("cast_intent — speak a desire upon reality, always succeeds{}", numen_hint));
@@ -1222,41 +1422,60 @@ Do not use quotation marks. Do not use names in the sentence. Just the summary."
     }
 
     // -----------------------------------------------------------------------
-    // ASCII map renderer
+    // Colored ASCII map renderer
     // -----------------------------------------------------------------------
 
     pub fn render_map(&self) -> String {
-        let top_bot = format!("  +{}+", "-".repeat(GRID_W * 2 - 1));
+        let border_width = GRID_W * 2 - 1;
+        let top_bot = format!("  +{}+", "-".repeat(border_width));
         let mut lines = vec![top_bot.clone()];
 
         for row in 0..GRID_H {
-            let mut row_chars: Vec<char> = Vec::with_capacity(GRID_W);
+            let mut row_str = String::new();
             for col in 0..GRID_W {
                 let pos = (col as u8, row as u8);
-                let here: Vec<char> = self.agents.iter()
-                    .filter(|a| a.pos == pos)
-                    .map(|a| a.name().chars().next().unwrap_or('?'))
-                    .collect();
-                let ch = if !here.is_empty() {
-                    here[0]
-                } else {
-                    tile_char(self.grid[row][col])
-                };
-                row_chars.push(ch);
+                if !row_str.is_empty() { row_str.push(' '); }
+
+                // Priority 1: agent at this position
+                if let Some(a) = self.agents.iter().find(|a| a.pos == pos) {
+                    let initial = a.name().chars().next().unwrap_or('?').to_string();
+                    row_str.push_str(&format!("{}", initial.color(color::agent_color(a.id)).bold()));
+                    continue;
+                }
+
+                // Priority 2 & 3: resource node (charged or depleted)
+                if let Some(node) = self.resource_nodes.iter().find(|n| n.pos == pos) {
+                    let ch = node.map_char().to_string();
+                    row_str.push_str(&format!("{}", ch.color(node.node_color())));
+                    continue;
+                }
+
+                // Priority 4: tile
+                let tile = self.grid[row][col];
+                let ch   = tile_char(tile).to_string();
+                row_str.push_str(&format!("{}", ch.color(color::tile_color(tile))));
             }
-            let row_str = row_chars.iter()
-                .map(|c| c.to_string())
-                .collect::<Vec<_>>()
-                .join(" ");
             lines.push(format!("  |{}|", row_str));
         }
 
         lines.push(top_bot);
+
+        // Roster line: each agent's initial + name + position in their color
+        let roster: String = self.agents.iter().enumerate().map(|(i, a)| {
+            let initial = a.name().chars().next().unwrap_or('?').to_string();
+            let pos     = a.pos;
+            format!(" {} {} ({},{})",
+                initial.color(color::agent_color(i)).bold(),
+                a.name().color(color::agent_color(i)).bold(),
+                pos.0, pos.1)
+        }).collect::<Vec<_>>().join("  ");
+        lines.push(format!(" {}", roster));
+
         lines.join("\n")
     }
 
     // -----------------------------------------------------------------------
-    // 5×5 viewport centered on agent
+    // 5×5 viewport centered on agent (plain ASCII, for LLM prompt)
     // -----------------------------------------------------------------------
 
     fn build_viewport(&self, center: (u8, u8), radius: usize) -> String {
@@ -1298,6 +1517,8 @@ Do not use quotation marks. Do not use names in the sentence. Just the summary."
             ("River",          TileType::River),
             ("Village Square", TileType::Square),
             ("Tavern",         TileType::Tavern),
+            ("Village Well",   TileType::Well),
+            ("Eastern Meadow", TileType::Meadow),
         ];
         let mut parts = Vec::new();
         for (name, ttype) in regions {
@@ -1332,6 +1553,8 @@ Do not use quotation marks. Do not use names in the sentence. Just the summary."
             TileType::River   => "River".to_string(),
             TileType::Square  => "Village Square".to_string(),
             TileType::Tavern  => "Tavern".to_string(),
+            TileType::Well    => "Village Well".to_string(),
+            TileType::Meadow  => "Eastern Meadow".to_string(),
             TileType::Home(n) => {
                 if let Some(a) = self.agents.get(n) {
                     format!("{}'s Home", a.identity.name)
@@ -1349,6 +1572,8 @@ Do not use quotation marks. Do not use names in the sentence. Just the summary."
             TileType::River   => "A clear river murmurs over stones. Willows trail their fingers in the water.",
             TileType::Square  => "The heart of the village. Open sky, worn cobblestones, familiar faces.",
             TileType::Tavern  => "A warm, low-ceilinged tavern. The smell of ale and woodsmoke.",
+            TileType::Well    => "A stone well, cool and deep. Clear water drawn fresh from the earth.",
+            TileType::Meadow  => "Wide open meadows of swaying grass. Room to run, to play, to breathe.",
             TileType::Home(_) => "A small, cosy home. Familiar and safe.",
         }
     }
@@ -1360,6 +1585,8 @@ Do not use quotation marks. Do not use names in the sentence. Just the summary."
             TileType::River   => matches!(action, "fish" | "bathe"),
             TileType::Square  => matches!(action, "exercise" | "play"),
             TileType::Tavern  => matches!(action, "eat" | "cook" | "play"),
+            TileType::Well    => matches!(action, "bathe" | "rest"),
+            TileType::Meadow  => matches!(action, "play" | "exercise" | "explore"),
             TileType::Home(_) => matches!(action, "eat" | "cook" | "sleep"),
         }
     }
@@ -1372,11 +1599,13 @@ Do not use quotation marks. Do not use names in the sentence. Just the summary."
         let lower = name.to_lowercase();
         let lower = lower.trim();
         match lower {
-            "forest"                          => return Some(TileType::Forest),
-            "river"                           => return Some(TileType::River),
-            "village square" | "square"       => return Some(TileType::Square),
-            "tavern"                          => return Some(TileType::Tavern),
-            "home" | "my home" | "my house"   => return Some(TileType::Home(agent_idx)),
+            "forest"                                    => return Some(TileType::Forest),
+            "river"                                     => return Some(TileType::River),
+            "village square" | "square"                 => return Some(TileType::Square),
+            "tavern"                                    => return Some(TileType::Tavern),
+            "well" | "village well"                     => return Some(TileType::Well),
+            "meadow" | "eastern meadow"                 => return Some(TileType::Meadow),
+            "home" | "my home" | "my house"             => return Some(TileType::Home(agent_idx)),
             _ => {}
         }
         if lower.contains("rowan") && lower.contains("home") { return Some(TileType::Home(1)); }
@@ -1392,7 +1621,6 @@ Do not use quotation marks. Do not use names in the sentence. Just the summary."
 
     /// BFS to find the nearest tile matching `target_type`.
     fn nearest_tile_of_type(&self, from: (u8, u8), target_type: TileType) -> Option<(u8, u8)> {
-        // If already on a matching tile, return immediately.
         if self.tile_at(from) == target_type { return Some(from); }
 
         let mut visited = [[false; GRID_W]; GRID_H];
@@ -1456,20 +1684,32 @@ Do not use quotation marks. Do not use names in the sentence. Just the summary."
 }
 
 // ---------------------------------------------------------------------------
-// Build the 24×12 tile grid
+// Build the 32×32 tile grid
 // ---------------------------------------------------------------------------
 
 fn build_grid() -> [[TileType; GRID_W]; GRID_H] {
     let mut g = [[TileType::Open; GRID_W]; GRID_H];
 
-    // Forest: cols 4-9, rows 0-2
-    for row in 0..3  { for col in 4..10 { g[row][col] = TileType::Forest; } }
-    // River:  cols 12-14, rows 1-2
-    for row in 1..3  { for col in 12..15 { g[row][col] = TileType::River; } }
-    // Square: cols 4-8, rows 4-6
-    for row in 4..7  { for col in 4..9  { g[row][col] = TileType::Square; } }
-    // Tavern: cols 10-13, rows 5-6
-    for row in 5..7  { for col in 10..14 { g[row][col] = TileType::Tavern; } }
+    // Forest (N): rows 0..10, cols 0..16
+    for row in 0..10  { for col in 0..16  { g[row][col] = TileType::Forest; } }
+    // Forest (W): rows 10..20, cols 0..4
+    for row in 10..20 { for col in 0..4   { g[row][col] = TileType::Forest; } }
+
+    // River N-S channel: rows 0..22, cols 15..18 (placed before Square/Tavern so they can override)
+    for row in 0..22  { for col in 15..18 { g[row][col] = TileType::River; } }
+    // River bend: rows 22..26, cols 15..23
+    for row in 22..26 { for col in 15..23 { g[row][col] = TileType::River; } }
+
+    // Village Square: rows 14..20, cols 8..16 (overrides river at col 15 in those rows)
+    for row in 14..20 { for col in 8..16  { g[row][col] = TileType::Square; } }
+    // Tavern: rows 14..17, cols 17..22 (overrides river at col 17 in those rows)
+    for row in 14..17 { for col in 17..22 { g[row][col] = TileType::Tavern; } }
+
+    // Well: rows 11..13, cols 13..15
+    for row in 11..13 { for col in 13..15 { g[row][col] = TileType::Well; } }
+
+    // Meadow: rows 18..30, cols 22..32
+    for row in 18..30 { for col in 22..32 { g[row][col] = TileType::Meadow; } }
 
     // Home tiles
     for (i, &(hx, hy)) in HOME_POSITIONS.iter().enumerate() {

@@ -1,5 +1,6 @@
 mod action;
 mod agent;
+mod color;
 mod config;
 mod llm;
 mod log;

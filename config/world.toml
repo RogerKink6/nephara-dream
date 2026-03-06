@@ -110,3 +110,6 @@ reflection_max_tokens  = 200
 # smart_model = "llama3:70b"   # optional: separate model for planning/reflection/desires
 narrator_max_tokens    = 120
 desires_max_tokens     = 100
+
+[world]
+resource_respawn_ticks = 20

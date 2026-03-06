@@ -141,3 +141,60 @@ I spent time near the river, fishing without much luck. The stillness was welcom
 
 ## Run 20260305_224033_42 — 2026-03-05 — 0 days (1 ticks)
 - Day 1: Rowan cast intent: "I want the wind to bring news from far away" → The sound of the village seems to quiet, just slightly.
+
+## Run 20260305_225730_42 Day 1 — 2026-03-05
+I spent time near the river, fishing without much luck. The stillness was welcome nonetheless.
+
+## Run 20260305_225730_42 — 2026-03-05 — 2 days (96 ticks)
+- Day 1: Rowan cast intent: "I want the wind to bring news from far away" → The sound of the village seems to quiet, just slightly.
+- Day 1: Rowan cast intent: "I wish for clarity of mind and purpose" → A warmth settles in the bones, like sun through thin cloth.
+- Day 1: Rowan cast intent: "Let the shadows keep their secrets a little longer" → A warmth settles in the bones, like sun through thin cloth.
+- Day 1: Rowan cast intent: "I want the morning light to be gentler on my eyes" → A smell of rain arrives before any rain does.
+- Day 1: Rowan cast intent: "I wish for clarity of mind and purpose" → The sound of the village seems to quiet, just slightly.
+- Day 1: Rowan cast intent: "Let the river remember my name" → The light bends strangely for a moment, then settles.
+- Day 1: Rowan cast intent: "I want the morning light to be gentler on my eyes" → A warmth settles in the bones, like sun through thin cloth.
+- Day 2: Rowan cast intent: "Let the air carry the smell of fresh bread" → The light bends strangely for a moment, then settles.
+- Day 2: Rowan cast intent: "I want the morning light to be gentler on my eyes" → The sound of the village seems to quiet, just slightly.
+- Day 2: Rowan cast intent: "Let the river remember my name" → The light bends strangely for a moment, then settles.
+- Day 2: Rowan cast intent: "Let the shadows keep their secrets a little longer" → The sound of the village seems to quiet, just slightly.
+- Day 2: Rowan cast intent: "May my steps feel lighter today" → A smell of rain arrives before any rain does.
+- Day 2: Rowan cast intent: "I want the morning light to be gentler on my eyes" → The sound of the village seems to quiet, just slightly.
+- Day 2: Rowan cast intent: "May my steps feel lighter today" → A warmth settles in the bones, like sun through thin cloth.
+- Day 2: Rowan cast intent: "Let the air carry the smell of fresh bread" → A warmth settles in the bones, like sun through thin cloth.
+- Day 2: Rowan cast intent: "I want the wind to bring news from far away" → A smell of rain arrives before any rain does.
+- Day 2: Rowan cast intent: "May my steps feel lighter today" → A warmth settles in the bones, like sun through thin cloth.
+
+## Run 20260305_230133_15661350067767091177 Day 1 — 2026-03-05
+The evening deepened, and after a surprisingly engaging conversation with Elara about the way light fractured through the trees, I found myself considering the village’s folklore – she’d mentioned whispers of ancient spirits tied to the river. It felt…right, somehow, this quiet contemplation alongside her, a gentle easing into this new place, and a small, persistent feeling that I was already beginning to belong.
+
+## Run 20260305_230133_15661350067767091177 Day 2 — 2026-03-05
+The afternoon was spent tracing the riverbank, captivated by the way the sunlight danced on the water and the darting movements of the minnows – a strangely soothing distraction. As I moved toward the village square, a quiet sense of anticipation settled over me, fueled by the lingering warmth of Elara’s conversation and the feeling that I was slowly, beautifully, finding my place here.
+
+## Run 20260305_230133_15661350067767091177 — 2026-03-05 — 3 days (144 ticks)
+- Day 2: Rowan cast intent: "Warmth. Sustenance." → A small, crackling fire appears beside Rowan, providing warmth and a rudimentary cooking space. A simple broth simmers gently in a cast-iron pot.
+- Day 2: Rowan cast intent: "The hearth breathes, let it glow." → A small, contained hearth appears beside the riverbank, radiating a gentle, warm light.
+- Day 3: Rowan cast intent: "‘Grow gently, settle softly.’" → The surrounding crops – primarily wheat and barley – exhibit a noticeable, accelerated growth. Stalks thicken, heads swell, and the overall yield increases visibly within the square.
+- Day 3: Rowan cast intent: "‘Let the earth soften.’" → The earth in the Village Square softens, becoming noticeably more pliable and damp.
+- Day 3: Rowan cast intent: "Warmth for the belly, a quiet fullness." → A small, crackling fire appears in the center of the field, radiating a gentle warmth.
+- Day 3: Rowan cast intent: "‘A hearth’" → A small, stone hearth appears in the center of the field, radiating a gentle warmth.
+
+## Run 20260306_045034_42 Day 1 — 2026-03-06
+I pushed myself too hard and felt it by evening. Rest came as a relief.
+
+## Run 20260306_045034_42 — 2026-03-06 — 2 days (96 ticks)
+- Day 1: Rowan cast intent: "I want the wind to bring news from far away" → The sound of the village seems to quiet, just slightly.
+- Day 1: Rowan critically failed at Exercise
+- Day 1: Rowan cast intent: "Let the shadows keep their secrets a little longer" → A warmth settles in the bones, like sun through thin cloth.
+- Day 1: Rowan cast intent: "I wish for clarity of mind and purpose" → The sound of the village seems to quiet, just slightly.
+- Day 1: Rowan cast intent: "May my steps feel lighter today" → A smell of rain arrives before any rain does.
+- Day 1: Rowan got a critical success on Exercise
+- Day 2: Rowan cast intent: "I want the morning light to be gentler on my eyes" → A smell of rain arrives before any rain does.
+- Day 2: Rowan cast intent: "Let the air carry the smell of fresh bread" → A warmth settles in the bones, like sun through thin cloth.
+- Day 2: Rowan cast intent: "Let the shadows keep their secrets a little longer" → The sound of the village seems to quiet, just slightly.
+- Day 2: Rowan cast intent: "Let the river remember my name" → A smell of rain arrives before any rain does.
+- Day 2: Rowan cast intent: "I want the morning light to be gentler on my eyes" → A warmth settles in the bones, like sun through thin cloth.
+- Day 2: Rowan cast intent: "May my steps feel lighter today" → A warmth settles in the bones, like sun through thin cloth.
+- Day 2: Rowan cast intent: "Let the air carry the smell of fresh bread" → A warmth settles in the bones, like sun through thin cloth.
+- Day 2: Rowan cast intent: "I want the wind to bring news from far away" → A smell of rain arrives before any rain does.
+- Day 2: Rowan cast intent: "Let the river remember my name" → The sound of the village seems to quiet, just slightly.
+- Day 2: Rowan cast intent: "Let the river remember my name" → A smell of rain arrives before any rain does.
