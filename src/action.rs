@@ -137,10 +137,18 @@ impl Resolution {
     pub fn check_line(&self) -> String {
         if self.dc == 0 { return String::new(); }
         let attr = self.attribute_label();
-        if attr.is_empty() {
-            format!("{} vs DC {} | {}", self.total, self.dc, self.tier.label())
+        let mod_val = self.modifier + self.penalty;
+        let mod_str = if mod_val > 0 {
+            format!("+{}", mod_val)
+        } else if mod_val < 0 {
+            format!("{}", mod_val)
         } else {
-            format!("{} {} vs DC {} | {}", attr, self.total, self.dc, self.tier.label())
+            String::new()
+        };
+        if attr.is_empty() {
+            format!("d20({}){}={} vs DC {} | {}", self.roll, mod_str, self.total, self.dc, self.tier.label())
+        } else {
+            format!("{} d20({}){}={} vs DC {} | {}", attr, self.roll, mod_str, self.total, self.dc, self.tier.label())
         }
     }
 
@@ -282,40 +290,42 @@ struct ActionResponse {
     action: Option<String>,
     target: Option<String>,
     intent: Option<String>,
-    #[allow(dead_code)]
     reason: Option<String>,
 }
 
 /// Cascading parser: JSON → code-fence extraction → regex → Wander default.
-pub fn parse_response(raw: &str) -> Action {
+/// Returns (action, reason) where reason is the LLM's stated reasoning if available.
+pub fn parse_response(raw: &str) -> (Action, Option<String>) {
     // 1. Try direct JSON parse
-    if let Some(a) = try_parse_json(raw) {
+    if let Some((a, r)) = try_parse_json(raw) {
         debug!(target: "action", action = ?a, "Action parsed from LLM output");
-        return a;
+        return (a, r);
     }
     // 2. Extract from ```json ... ``` code fence
     if let Some(json) = extract_code_fence(raw) {
-        if let Some(a) = try_parse_json(&json) {
+        if let Some((a, r)) = try_parse_json(&json) {
             debug!(target: "action", action = ?a, "Action parsed from LLM output");
-            return a;
+            return (a, r);
         }
     }
     // 3. Extract action name with regex-like scan
     if let Some(action_name) = extract_action_field(raw) {
         let a = action_from_name(&action_name, None, None);
         debug!(target: "action", action = ?a, "Action parsed from LLM output");
-        return a;
+        return (a, None);
     }
     // 4. Default
     tracing::warn!("Could not parse LLM response, defaulting to Wander. Raw: {}", &raw[..raw.len().min(200)]);
-    Action::Wander
+    (Action::Wander, None)
 }
 
-fn try_parse_json(s: &str) -> Option<Action> {
+fn try_parse_json(s: &str) -> Option<(Action, Option<String>)> {
     let s = s.trim();
     let parsed: ActionResponse = serde_json::from_str(s).ok()?;
     let name = parsed.action?;
-    Some(action_from_name(&name, parsed.target.as_deref(), parsed.intent.as_deref()))
+    let action = action_from_name(&name, parsed.target.as_deref(), parsed.intent.as_deref());
+    let reason = parsed.reason.filter(|r| !r.is_empty());
+    Some((action, reason))
 }
 
 fn extract_code_fence(s: &str) -> Option<String> {

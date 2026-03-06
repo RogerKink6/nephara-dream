@@ -57,6 +57,20 @@ fn tile_char(tile: TileType) -> char {
 }
 
 // ---------------------------------------------------------------------------
+// Helper: visible state label for nearby agents
+// ---------------------------------------------------------------------------
+
+fn agent_visible_state<'a>(a: &Agent, config: &Config) -> Option<&'static str> {
+    let t = &config.needs.thresholds;
+    if a.is_busy()                       { return Some("busy"); }
+    if a.needs.energy < t.penalty_severe { return Some("exhausted"); }
+    if a.needs.hunger < t.penalty_severe { return Some("hungry"); }
+    if a.needs.fun    < t.penalty_severe { return Some("withdrawn"); }
+    if a.needs.social < t.penalty_severe { return Some("lonely"); }
+    None
+}
+
+// ---------------------------------------------------------------------------
 // Tick result (returned from World::tick)
 // ---------------------------------------------------------------------------
 
@@ -183,12 +197,12 @@ impl World {
         }
 
         // --- Forced sleep if energy < forced_action threshold ---
-        let action = if self.agents[idx].needs.energy < self.config.needs.thresholds.forced_action
+        let (action, reason) = if self.agents[idx].needs.energy < self.config.needs.thresholds.forced_action
             && self.is_at_own_home(idx)
         {
-            Action::Sleep
+            (Action::Sleep, None)
         } else if self.agents[idx].needs.energy < self.config.needs.thresholds.forced_action {
-            Action::Move { destination: "home".to_string() }
+            (Action::Move { destination: "home".to_string() }, None)
         } else {
             // Build schema from available canonical names
             let canonical = self.available_canonical_names(idx);
@@ -215,7 +229,11 @@ impl World {
         let action   = self.validate(idx, action);
         let tile     = self.tile_at(self.agents[idx].pos);
         let loc_name = self.tile_name(tile);
-        let entry    = self.resolve_and_apply(idx, action, &loc_name, tick, day, tod, is_night).await?;
+        let mut entry = self.resolve_and_apply(idx, action, &loc_name, tick, day, tod, is_night).await?;
+
+        if let Some(r) = reason.filter(|r| !r.is_empty()) {
+            entry.outcome_line = format!("{}\n({})", entry.outcome_line, r);
+        }
 
         Ok(entry)
     }
@@ -582,12 +600,26 @@ impl World {
             duration,
             if duration == 1 { "" } else { "s" },
         );
+        let interp_note = interpreted.interpretations
+            .iter()
+            .map(|s| s.as_str())
+            .collect::<Vec<_>>()
+            .join(", ");
         let full_outcome = if interpreted.secondary_effect.is_empty() {
-            format!("{}\n{}", interpreted.memory_entry, meta)
+            if interp_note.is_empty() {
+                format!("{}\n{}", interpreted.primary_effect, meta)
+            } else {
+                format!("{}\n[read as: {}]\n{}", interpreted.primary_effect, interp_note, meta)
+            }
+        } else if interp_note.is_empty() {
+            format!(
+                "{}\n(secondary: {})\n{}",
+                interpreted.primary_effect, interpreted.secondary_effect, meta
+            )
         } else {
             format!(
-                "{}\n{}\n(secondary: {})",
-                interpreted.memory_entry, meta, interpreted.secondary_effect
+                "{}\n[read as: {}]\n(secondary: {})\n{}",
+                interpreted.primary_effect, interp_note, interpreted.secondary_effect, meta
             )
         };
 
@@ -614,10 +646,10 @@ impl World {
         let nearby: Vec<String> = self.agents.iter()
             .filter(|a| a.id != idx && Self::chebyshev_dist(a.pos, pos) <= 1)
             .map(|a| {
-                if a.is_busy() {
-                    format!("{} (busy)", a.name())
-                } else {
-                    a.name().to_string()
+                let state = agent_visible_state(a, &self.config);
+                match state {
+                    Some(s) => format!("{} ({})", a.name(), s),
+                    None    => a.name().to_string(),
                 }
             })
             .collect();
@@ -662,11 +694,22 @@ impl World {
             .collect::<Vec<_>>()
             .join("\n");
 
+        let self_decl_block = if !agent.identity.self_declaration.is_empty() {
+            format!("\nIn your own words: \"{}\"\n", agent.identity.self_declaration)
+        } else {
+            String::new()
+        };
+        let magic_block = if !agent.identity.magical_affinity.is_empty() {
+            format!("\nMagic: {}\n", agent.identity.magical_affinity)
+        } else {
+            String::new()
+        };
+
         format!(
             r#"You are {name}. {personality}
 
 {backstory}
-
+{self_decl_block}{magic_block}
 CURRENT STATE:
 - Location: {loc_name} — {loc_desc}
 - Time: Day {day}, {tod} (Tick {tick}){night_note}
@@ -698,6 +741,8 @@ Choose ONE action. Respond with ONLY a JSON object:
             name             = agent.identity.name,
             personality      = agent.identity.personality,
             backstory        = agent.identity.backstory,
+            self_decl_block  = self_decl_block,
+            magic_block      = magic_block,
             loc_name         = loc_name,
             loc_desc         = loc_desc,
             day              = day,
