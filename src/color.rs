@@ -1,4 +1,5 @@
 use colored::Color;
+use ratatui::style::Color as RatColor;
 
 use crate::world::TileType;
 
@@ -7,9 +8,14 @@ use crate::world::TileType;
 // ---------------------------------------------------------------------------
 
 pub const AGENT_COLORS: &[Color] = &[
-    Color::BrightCyan,    // Elara (0)
-    Color::BrightGreen,   // Rowan (1)
-    Color::BrightYellow,  // Thane (2)
+    Color::BrightCyan,    // 0
+    Color::BrightGreen,   // 1
+    Color::BrightYellow,  // 2
+    Color::BrightRed,     // 3
+    Color::BrightBlue,    // 4
+    Color::BrightMagenta, // 5
+    Color::Cyan,          // 6
+    Color::Green,         // 7
 ];
 
 pub fn agent_color(id: usize) -> Color {
@@ -61,6 +67,28 @@ pub fn needs_color(value: f32) -> Color {
 // ---------------------------------------------------------------------------
 // Location name colors (matched on string contents)
 // ---------------------------------------------------------------------------
+
+pub fn to_ratatui_color(c: Color) -> RatColor {
+    match c {
+        Color::Black        => RatColor::Black,
+        Color::Red          => RatColor::Red,
+        Color::Green        => RatColor::Green,
+        Color::Yellow       => RatColor::Yellow,
+        Color::Blue         => RatColor::Blue,
+        Color::Magenta      => RatColor::Magenta,
+        Color::Cyan         => RatColor::Cyan,
+        Color::White        => RatColor::White,
+        Color::BrightBlack  => RatColor::DarkGray,
+        Color::BrightRed    => RatColor::LightRed,
+        Color::BrightGreen  => RatColor::LightGreen,
+        Color::BrightYellow => RatColor::LightYellow,
+        Color::BrightBlue   => RatColor::LightBlue,
+        Color::BrightMagenta=> RatColor::LightMagenta,
+        Color::BrightCyan   => RatColor::LightCyan,
+        Color::BrightWhite  => RatColor::White,
+        _                   => RatColor::Reset,
+    }
+}
 
 pub fn location_color(loc: &str) -> Color {
     if loc.contains("Forest")       { Color::Green }

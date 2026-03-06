@@ -1,1 +1,0 @@
-I sought company today and found it briefly. The conversation lifted something in me.

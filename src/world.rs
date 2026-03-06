@@ -23,16 +23,18 @@ pub const GRID_W: usize = 32;
 pub const GRID_H: usize = 32;
 
 /// Home positions per agent index (x=col, y=row).
-/// Agents are sorted alphabetically: Elara=0, Rowan=1, Thane=2.
 pub const HOME_POSITIONS: &[(u8, u8)] = &[
-    (5, 17),   // agent 0: Elara
-    (8, 22),   // agent 1: Rowan
-    (23, 22),  // agent 2: Thane  ← was (19, 22), inside river bend
+    ( 5, 17),  // 0
+    ( 8, 22),  // 1
+    (23, 22),  // 2
+    ( 5, 24),  // 3 — south of home 0
+    (11, 24),  // 4 — south of square, west of river
+    ( 5, 27),  // 5
+    (11, 27),  // 6
+    (23, 26),  // 7 — deeper meadow
 ];
 
-fn home_pos_for(idx: usize) -> (u8, u8) {
-    HOME_POSITIONS.get(idx).copied().unwrap_or((0, 0))
-}
+pub const MAX_AGENTS: usize = HOME_POSITIONS.len();
 
 // ---------------------------------------------------------------------------
 // TileType
@@ -135,7 +137,7 @@ impl ResourceNode {
     }
 }
 
-fn build_resource_nodes() -> Vec<ResourceNode> {
+fn build_resource_nodes(n_agents: usize) -> Vec<ResourceNode> {
     let mut nodes = Vec::new();
 
     for &pos in &[(3u8, 3u8), (8, 5), (12, 7)] {
@@ -158,7 +160,7 @@ fn build_resource_nodes() -> Vec<ResourceNode> {
         });
     }
 
-    for &pos in &[(5u8, 17u8), (8, 22), (23, 22)] {
+    for &pos in &HOME_POSITIONS[..n_agents] {
         nodes.push(ResourceNode {
             kind: ResourceKind::Campfire,
             pos,
@@ -249,13 +251,23 @@ impl World {
         run_log:     RunLog,
         souls_dir:   String,
         is_test_run: bool,
-    ) -> Self {
+    ) -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
+        if seeds.is_empty() {
+            return Err("at least one soul seed is required (souls/ directory is empty)".into());
+        }
+        if seeds.len() > MAX_AGENTS {
+            return Err(format!(
+                "{} soul seeds found but maximum supported is {} — remove some from souls/",
+                seeds.len(), MAX_AGENTS
+            ).into());
+        }
+        let n_agents = seeds.len();
         let agents = seeds.iter().enumerate()
-            .map(|(i, s)| Agent::from_soul(i, s, &config, home_pos_for(i)))
+            .map(|(i, s)| Agent::from_soul(i, s, &config, HOME_POSITIONS[i]))
             .collect();
-        let grid           = build_grid();
-        let resource_nodes = build_resource_nodes();
-        World {
+        let grid           = build_grid(n_agents);
+        let resource_nodes = build_resource_nodes(n_agents);
+        Ok(World {
             tick_num: 0,
             agents,
             seed,
@@ -264,7 +276,7 @@ impl World {
             souls_dir,
             notable_events: Vec::new(),
             magic_count: 0,
-            magic_cast_this_day: vec![false; seeds.len()],
+            magic_cast_this_day: vec![false; n_agents],
             resource_nodes,
             is_test_run,
             pending_day_events: Vec::new(),
@@ -273,7 +285,7 @@ impl World {
             llm,
             llm_smart,
             llm_call_counter: 0,
-        }
+        })
     }
 
     /// Load life stories and oracle responses for each agent (called after construction).
@@ -2146,7 +2158,7 @@ Respond ONLY with JSON — no other text:
 // Build the 32×32 tile grid
 // ---------------------------------------------------------------------------
 
-fn build_grid() -> [[TileType; GRID_W]; GRID_H] {
+fn build_grid(n_agents: usize) -> [[TileType; GRID_W]; GRID_H] {
     let mut g = [[TileType::Open; GRID_W]; GRID_H];
 
     // Forest (N): rows 0..10, cols 0..16
@@ -2174,7 +2186,7 @@ fn build_grid() -> [[TileType; GRID_W]; GRID_H] {
     for row in 10..13 { for col in 8..12 { g[row][col] = TileType::Temple; } }
 
     // Home tiles (2×3 block: 3 wide, 2 tall; HOME_POSITIONS is top-left corner)
-    for (i, &(hx, hy)) in HOME_POSITIONS.iter().enumerate() {
+    for (i, &(hx, hy)) in HOME_POSITIONS[..n_agents].iter().enumerate() {
         for dy in 0..2usize {
             for dx in 0..3usize {
                 g[hy as usize + dy][hx as usize + dx] = TileType::Home(i);

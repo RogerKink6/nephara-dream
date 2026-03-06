@@ -1,1 +1,0 @@
-I pushed myself too hard and felt it by evening. Rest came as a relief.

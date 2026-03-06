@@ -176,7 +176,7 @@ async fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let mut world = World::new(
         souls, cfg.clone(), seed, rng,
         backend, smart_backend, run_log, cli.souls.clone(), is_test_run,
-    );
+    )?;
     world.load_stories().await;
 
     let total_ticks = cli.ticks.unwrap_or(cfg.simulation.default_run_ticks);
