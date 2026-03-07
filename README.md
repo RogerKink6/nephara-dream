@@ -2,7 +2,7 @@
 
 A text-based world simulation where AI agents (small local LLMs via Ollama) inhabit a shared village, perceive their surroundings, and take actions driven by needs, personality, and a Kabbalistic freeform magic system.
 
-Three founding entities — Elara, Rowan, and Thane — live out their days in a tick-based loop. Each tick an agent perceives the world, decides on an action, and the world resolves it with d20 rolls and narrative. Spells always succeed, but words carry all their meanings.
+Five entities — Elara, Rowan, Thane, Mira, and Sael — live out their days in a tick-based loop. Each tick an agent perceives the world, decides on an action, and the world resolves it with d20 rolls and narrative. Spells always succeed, but words carry all their meanings.
 
 ## Requirements
 
@@ -37,26 +37,36 @@ Short test run:
 cargo run -- --llm mock --ticks 48 --seed 42
 ```
 
-### Live run (Ollama + local LLM)
+### Live run (llama.cpp — default backend)
 
-In a separate terminal, start Ollama and pull the model:
-
-```sh
-ollama serve
-ollama pull gemma3:4b
-```
-
-Then run:
+The default backend is `llamacpp`, which expects an OpenAI-compatible server (e.g., llama.cpp) at `http://localhost:8080`. Start your server, then:
 
 ```sh
 cargo run
 ```
 
+Override the model or URL:
+
+```sh
+cargo run -- --model my-model-name
+cargo run -- --llm-url http://other-host:8080
+```
+
+### Live run (Ollama)
+
+Ollama is still fully supported via `--llm ollama`:
+
+```sh
+ollama serve
+ollama pull gemma3:4b
+cargo run -- --llm ollama
+```
+
 Override the model or Ollama URL:
 
 ```sh
-cargo run -- --model gemma3:12b
-cargo run -- --llm-url http://other-host:11434
+cargo run -- --llm ollama --model gemma3:12b
+cargo run -- --llm ollama --llm-url http://other-host:11434
 ```
 
 ## CLI Reference
@@ -66,8 +76,8 @@ nephara [OPTIONS]
 
 Options:
   --ticks <N>       Ticks to simulate (default: 96, i.e. 2 in-game days)
-  --llm <BACKEND>   LLM backend: ollama (default) or mock
-  --llm-url <URL>   Override Ollama URL (default: http://localhost:11434)
+  --llm <BACKEND>   LLM backend: llamacpp (default), ollama, claude, mock
+  --llm-url <URL>   Override backend URL (default: http://localhost:8080 for llamacpp, http://localhost:11434 for ollama)
   --model <MODEL>   Override model name (default: gemma3:4b)
   --config <PATH>   Config file (default: config/world.toml)
   --souls <DIR>     Soul seeds directory (default: souls/)
@@ -75,6 +85,13 @@ Options:
   --no-tui          Use streaming terminal output instead of fullscreen TUI
   --debug-llm       Write all LLM prompts and responses to runs/{id}/llm_debug.md
   --verbose         Enable debug logging
+
+nephara bench [OPTIONS]
+
+  --models <m1,m2,...>   Comma-separated model names to benchmark
+  --samples <N>          Prompts per model per type (default: 5)
+  --llm-url <URL>        Override backend URL
+  --output <FILE>        Write JSON report (default: stdout)
 ```
 
 ## TUI Mode
@@ -97,6 +114,7 @@ Use `--no-tui` for the original streaming output (useful for piping or scripting
 Each run creates a directory under `runs/` containing:
 
 - `tick_log.txt` — the full scrolling narrative
+- `summary.md` — human-readable run summary (agent needs, magic cast, notable events, wall time)
 - `state_dump_tick_NNNN.json` — world snapshots every N ticks (configurable)
 - `introspection.md` — agent desire/intention summaries each tick
 - `llm_debug.md` — all LLM prompts and responses (only with `--debug-llm`)
