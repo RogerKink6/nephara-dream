@@ -20,7 +20,7 @@ use rand::{Rng, SeedableRng};
 use tracing::{error, info, warn};
 use tracing_subscriber::EnvFilter;
 
-use llm::{ClaudeBackend, LlmBackend, MockBackend, OllamaBackend};
+use llm::{ClaudeBackend, LlmBackend, MockBackend, OllamaBackend, OpenAICompatBackend};
 use log::RunLog;
 use world::World;
 
@@ -68,11 +68,11 @@ struct Cli {
     #[arg(long)]
     ticks: Option<u32>,
 
-    /// LLM backend: ollama or mock.
-    #[arg(long, default_value = "ollama")]
+    /// LLM backend: llamacpp, ollama, claude, mock.
+    #[arg(long, default_value = "llamacpp")]
     llm: String,
 
-    /// Override Ollama URL.
+    /// Override LLM backend URL (applies to llamacpp and ollama).
     #[arg(long)]
     llm_url: Option<String>,
 
@@ -136,7 +136,10 @@ async fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
 
     // --- Config ---
     let mut cfg = config::load(&cli.config)?;
-    if let Some(url)   = &cli.llm_url { cfg.llm.ollama_url = url.clone(); }
+    if let Some(url) = &cli.llm_url {
+        cfg.llm.ollama_url   = url.clone();
+        cfg.llm.llamacpp_url = url.clone();
+    }
     if let Some(model) = &cli.model   { cfg.llm.model      = model.clone(); }
 
     info!("Loaded config from '{}'", cli.config);
@@ -161,7 +164,7 @@ async fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
             info!("Using ClaudeBackend — model: {}", model);
             Arc::new(ClaudeBackend::new(model).map_err(|e| { error!("{}", e); e })?)
         }
-        _ => {
+        "ollama" => {
             info!("Using OllamaBackend — model: {}, url: {}", cfg.llm.model, cfg.llm.ollama_url);
             let ollama = OllamaBackend::new(
                 cfg.llm.ollama_url.clone(),
@@ -176,11 +179,24 @@ async fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
             }
             Arc::new(ollama)
         }
+        _ => {
+            // "llamacpp" | "openai" | anything else → OpenAI-compatible backend
+            info!("Using OpenAICompatBackend — model: {}, url: {}", cfg.llm.model, cfg.llm.llamacpp_url);
+            let llamacpp = OpenAICompatBackend::new(
+                cfg.llm.llamacpp_url.clone(),
+                cfg.llm.model.clone(),
+                cfg.llm.temperature,
+                cfg.llm.think,
+                cfg.llm.thinking_budget_chars,
+            );
+            llamacpp.health_check().await;  // warn but don't abort
+            Arc::new(llamacpp)
+        }
     };
 
     // --- Smart backend ---
     let smart_backend: Arc<dyn LlmBackend> = match cli.llm.as_str() {
-        "mock" | "claude" => Arc::clone(&backend),
+        "mock" | "claude" | "llamacpp" | "openai" => Arc::clone(&backend),
         _ => match &cfg.llm.smart_model.clone() {
             Some(model) => {
                 let smart_url = cfg.llm.smart_ollama_url.clone()

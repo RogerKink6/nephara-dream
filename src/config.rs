@@ -108,6 +108,7 @@ pub struct LlmConfig {
     pub temperature:            f32,
     pub max_tokens:             u32,
     pub ollama_url:             String,
+    pub llamacpp_url:           String,
     pub interpreter_max_tokens: u32,
     pub planning_max_tokens:    u32,
     pub reflection_max_tokens:  u32,

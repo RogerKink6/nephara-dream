@@ -250,6 +250,242 @@ impl LlmBackend for OllamaBackend {
 }
 
 // ---------------------------------------------------------------------------
+// OpenAI-compatible backend (llama.cpp, vLLM, LM Studio, etc.)
+// ---------------------------------------------------------------------------
+
+pub struct OpenAICompatBackend {
+    pub url:                   String,
+    pub model:                 String,
+    pub temperature:           f32,
+    /// When Some(false), sets `thinking_forced_off: true` in the request body
+    /// to disable chain-of-thought on thinking models via llama.cpp.
+    pub think:                 Option<bool>,
+    /// Abort the stream when accumulated thinking chars exceed this limit.
+    pub thinking_budget_chars: Option<usize>,
+    client:                    reqwest::Client,
+}
+
+impl OpenAICompatBackend {
+    pub fn new(
+        url:                   String,
+        model:                 String,
+        temperature:           f32,
+        think:                 Option<bool>,
+        thinking_budget_chars: Option<usize>,
+    ) -> Self {
+        OpenAICompatBackend { url, model, temperature, think, thinking_budget_chars, client: reqwest::Client::new() }
+    }
+
+    pub async fn health_check(&self) {
+        let url = format!("{}/health", self.url);
+        match self.client.get(&url).send().await {
+            Ok(resp) if resp.status().is_success() => {
+                info!(target: "llm", url = %self.url, model = %self.model, "llama.cpp server ready");
+            }
+            Ok(resp) => {
+                warn!(target: "llm", status = %resp.status(),
+                      "llama.cpp health check returned non-200 — continuing anyway");
+            }
+            Err(e) => {
+                warn!(target: "llm", error = %e,
+                      "llama.cpp health check failed — server may not be running");
+            }
+        }
+    }
+}
+
+#[derive(Serialize)]
+struct OAIRequest<'a> {
+    model:       &'a str,
+    messages:    Vec<OAIMessage<'a>>,
+    stream:      bool,
+    temperature: f32,
+    max_tokens:  u32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    seed:        Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    response_format:     Option<OAIResponseFormat<'a>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    thinking_forced_off: Option<bool>,
+}
+
+#[derive(Serialize)]
+struct OAIMessage<'a> {
+    role:    &'static str,
+    content: &'a str,
+}
+
+#[derive(Serialize)]
+struct OAIResponseFormat<'a> {
+    #[serde(rename = "type")]
+    type_:       &'static str,
+    json_schema: OAIJsonSchema<'a>,
+}
+
+#[derive(Serialize)]
+struct OAIJsonSchema<'a> {
+    name:   &'static str,
+    schema: &'a serde_json::Value,
+}
+
+#[derive(Deserialize)]
+struct OAIChunk {
+    choices: Vec<OAIChoice>,
+}
+
+#[derive(Deserialize)]
+struct OAIChoice {
+    delta: OAIDelta,
+}
+
+#[derive(Deserialize)]
+struct OAIDelta {
+    #[serde(default)]
+    content:           Option<String>,
+    #[serde(default)]
+    reasoning_content: Option<String>,
+}
+
+#[async_trait]
+impl LlmBackend for OpenAICompatBackend {
+    async fn generate(
+        &self,
+        prompt:     &str,
+        max_tokens: u32,
+        seed:       Option<u64>,
+        schema:     Option<&serde_json::Value>,
+        token_tx:   Option<UnboundedSender<String>>,
+    ) -> Result<String> {
+        let url = format!("{}/v1/chat/completions", self.url);
+
+        let response_format = schema.map(|s| OAIResponseFormat {
+            type_:       "json_schema",
+            json_schema: OAIJsonSchema { name: "response", schema: s },
+        });
+
+        // think: Some(false) → disable chain-of-thought via thinking_forced_off
+        let thinking_forced_off = match self.think {
+            Some(false) => Some(true),
+            _           => None,
+        };
+
+        let body = OAIRequest {
+            model:       &self.model,
+            messages:    vec![OAIMessage { role: "user", content: prompt }],
+            stream:      true,
+            temperature: seed.map(|_| 0.0).unwrap_or(self.temperature),
+            max_tokens,
+            seed:        seed.map(|s| s as i64),
+            response_format,
+            thinking_forced_off,
+        };
+
+        debug!(target: "llm", model = %self.model, max_tokens = max_tokens,
+               prompt_chars = prompt.len(), has_schema = schema.is_some(),
+               think = ?self.think, "LLM request (OpenAI-compat)");
+
+        let mut resp = self
+            .client
+            .post(&url)
+            .json(&body)
+            .send()
+            .await
+            .map_err(|e| format!("llama.cpp HTTP error: {}", e))?;
+
+        if !resp.status().is_success() {
+            let status = resp.status();
+            let text   = resp.text().await.unwrap_or_default();
+            return Err(format!("llama.cpp returned {}: {}", status, text).into());
+        }
+
+        // Stream SSE; each content line is: `data: {...}\n`; ends with `data: [DONE]`
+        let mut buf            = Vec::<u8>::new();
+        let mut content        = String::new();
+        let mut thinking_chars = 0usize;
+        let mut done           = false;
+
+        'outer: while let Some(chunk) = resp.chunk().await
+            .map_err(|e| format!("llama.cpp stream error: {}", e))?
+        {
+            buf.extend_from_slice(&chunk);
+            while let Some(pos) = buf.iter().position(|&b| b == b'\n') {
+                let line_bytes: Vec<u8> = buf.drain(..=pos).collect();
+                let line = String::from_utf8_lossy(&line_bytes);
+                let line = line.trim();
+                if line.is_empty() { continue; }
+                if !line.starts_with("data: ") { continue; }
+                let data = &line["data: ".len()..];
+                if data == "[DONE]" { break 'outer; }
+
+                if let Ok(oai_chunk) = serde_json::from_str::<OAIChunk>(data) {
+                    if let Some(choice) = oai_chunk.choices.into_iter().next() {
+                        let new_thinking = choice.delta.reasoning_content
+                            .as_deref().unwrap_or("").len();
+                        let token = choice.delta.content.unwrap_or_default();
+
+                        // Thinking budget abort (mirrors Ollama backend logic)
+                        if content.is_empty() && new_thinking > 0 {
+                            thinking_chars += new_thinking;
+                            if let Some(budget) = self.thinking_budget_chars {
+                                if thinking_chars > budget {
+                                    warn!(target: "llm", thinking_chars, budget,
+                                          "thinking budget exceeded, aborting");
+                                    return Ok(String::new());
+                                }
+                            }
+                            continue;
+                        }
+                        thinking_chars += new_thinking;
+
+                        if !token.is_empty() {
+                            if let Some(ref tx) = token_tx {
+                                let _ = tx.send(token.clone());
+                            }
+                            content.push_str(&token);
+
+                            // Early abort when JSON schema-constrained response is complete
+                            if schema.is_some() && content.trim_end().ends_with('}') {
+                                if serde_json::from_str::<serde_json::Value>(content.trim()).is_ok() {
+                                    debug!(target: "llm", chars = content.len(), "early abort: JSON complete");
+                                    done = true;
+                                    break 'outer;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // Flush any remaining partial line not terminated before connection close
+        if !done && !buf.is_empty() {
+            let line = String::from_utf8_lossy(&buf);
+            let line = line.trim();
+            if line.starts_with("data: ") {
+                let data = &line["data: ".len()..];
+                if data != "[DONE]" {
+                    if let Ok(oai_chunk) = serde_json::from_str::<OAIChunk>(data) {
+                        if let Some(choice) = oai_chunk.choices.into_iter().next() {
+                            let token = choice.delta.content.unwrap_or_default();
+                            if !token.is_empty() {
+                                if let Some(ref tx) = token_tx {
+                                    let _ = tx.send(token.clone());
+                                }
+                                content.push_str(&token);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        debug!(target: "llm", chars = content.len(), thinking_chars = thinking_chars,
+               response = %content, "LLM response (OpenAI-compat)");
+        Ok(content)
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Claude API backend
 // ---------------------------------------------------------------------------
 
