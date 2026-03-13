@@ -138,6 +138,8 @@ pub struct TickEntry {
     pub outcome_tier_label: Option<String>,
     /// Total LLM time for this agent's turn in milliseconds.
     pub llm_duration_ms:    Option<u64>,
+    /// True when the agent is currently busy (multi-tick action in progress).
+    pub is_busy:            bool,
 }
 
 impl TickEntry {

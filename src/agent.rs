@@ -227,6 +227,14 @@ pub struct Agent {
     pub affinity:               HashMap<String, f32>,
     /// Theory-of-Mind belief map: other_name → accumulated rumors/impressions.
     pub beliefs:                HashMap<String, AgentBeliefs>,
+    /// Recent action names (newest first) for repeat-penalty and prompt context.
+    pub last_actions:           VecDeque<String>,
+    /// Human-readable label of the action currently being executed (shown during busy ticks).
+    pub current_action_display: String,
+    /// Ticks remaining until this agent must praise again (0 = must praise now).
+    pub praise_ticks_remaining: u32,
+    /// Last N praise texts for repetition detection.
+    pub recent_praises:         VecDeque<String>,
 }
 
 impl Agent {
@@ -264,6 +272,10 @@ impl Agent {
             attribute_last_success: HashMap::new(),
             affinity:               HashMap::new(),
             beliefs:                HashMap::new(),
+            last_actions:           VecDeque::new(),
+            current_action_display: String::new(),
+            praise_ticks_remaining: 0,
+            recent_praises:         VecDeque::new(),
         }
     }
 

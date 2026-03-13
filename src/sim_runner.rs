@@ -128,6 +128,7 @@ pub async fn run_simulation(
                 outcome_tier_label: entry.outcome_tier_label.clone(),
                 prayer_text,
                 llm_duration_ms:    entry.llm_duration_ms,
+                is_busy:            entry.is_busy,
             };
             let _ = tx.send(TuiEvent::AgentAction(snapshot)).await;
         }

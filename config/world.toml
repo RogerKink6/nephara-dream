@@ -78,11 +78,13 @@ fun_restore = 15.0
 dc          = 0
 
 [actions.cast_intent]
-min_duration_ticks = 1
-max_duration_ticks = 4
-energy_drain       = 8.0
-dc                 = 0        # Spells always succeed
-attribute          = "numen"  # Governs clarity, not success
+min_duration_ticks    = 1
+max_duration_ticks    = 4
+energy_drain          = 8.0
+dc                    = 0        # Spells always succeed
+attribute             = "numen"  # Governs clarity, not success
+repeat_window         = 5
+repeat_energy_penalty = 4.0
 
 [actions.pray]
 fun_restore    = 5.0
@@ -140,6 +142,12 @@ devotion_decay             = 5.0    # Devotion lost per skipped day
 devotion_gain_sincere      = 5.0
 devotion_gain_heartfelt    = 10.0
 devotion_gain_transcendent = 20.0
+praise_cooldown_transcendent = 15
+praise_cooldown_heartfelt    = 10
+praise_cooldown_sincere      =  6
+praise_cooldown_hollow       =  2
+praise_repeat_window         =  5
+praise_repeat_threshold      =  0.45
 
 [events]
 storm_prob    = 0.005   # ~once per 200 ticks

@@ -36,6 +36,16 @@ pub struct DailyPraiseConfig {
     pub devotion_gain_sincere:      f32,
     pub devotion_gain_heartfelt:    f32,
     pub devotion_gain_transcendent: f32,
+    /// Ticks of freedom after transcendent praise.
+    pub praise_cooldown_transcendent: u32,
+    pub praise_cooldown_heartfelt:    u32,
+    pub praise_cooldown_sincere:      u32,
+    /// Short cooldown — must praise again soon.
+    pub praise_cooldown_hollow:       u32,
+    /// How many recent praises to compare against for repetition detection.
+    pub praise_repeat_window:         usize,
+    /// Jaccard word-overlap threshold above which praise is considered repetitive.
+    pub praise_repeat_threshold:      f32,
 }
 
 #[derive(Debug, Deserialize, Clone)]
@@ -120,6 +130,8 @@ pub struct ActionConfig {
     #[serde(default)] pub duration_ticks:          Option<u32>,
     #[serde(default)] pub min_duration_ticks:      Option<u32>,
     #[serde(default)] pub max_duration_ticks:      Option<u32>,
+    #[serde(default)] pub repeat_window:           Option<usize>,
+    #[serde(default)] pub repeat_energy_penalty:   Option<f32>,
 }
 
 #[derive(Debug, Deserialize, Clone)]

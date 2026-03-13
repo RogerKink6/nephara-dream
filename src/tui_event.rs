@@ -103,6 +103,8 @@ pub struct TickEntrySnapshot {
     pub prayer_text:        Option<String>,
     /// Total LLM time in milliseconds for this agent's turn.
     pub llm_duration_ms:    Option<u64>,
+    /// True when the agent is currently busy (multi-tick action in progress).
+    pub is_busy:            bool,
 }
 
 #[derive(Clone)]

@@ -577,9 +577,10 @@ impl World {
                         });
                     }
                 }
-                // Reset daily_praised for the new day
+                // Reset daily_praised and praise cooldown for the new day
                 for agent in &mut self.agents {
-                    agent.daily_praised = false;
+                    agent.daily_praised          = false;
+                    agent.praise_ticks_remaining = 0;
                 }
 
                 for idx in 0..self.agents.len() {
@@ -608,9 +609,12 @@ impl World {
             entries.push(entry);
         }
 
-        // Passive need decay
+        // Passive need decay and praise cooldown countdown
         for agent in &mut self.agents {
             agent.needs.apply_decay(&self.config.needs.decay_per_tick);
+            if agent.praise_ticks_remaining > 0 {
+                agent.praise_ticks_remaining -= 1;
+            }
         }
 
         // Resource node respawn countdown
@@ -648,15 +652,21 @@ impl World {
             let ticks_left = self.agents[idx].busy_ticks;
             let tile       = self.tile_at(self.agents[idx].pos);
             let loc_name   = self.tile_name(tile);
+            let display_name = if self.agents[idx].current_action_display.is_empty() {
+                "Working\u{2026}".to_string()
+            } else {
+                self.agents[idx].current_action_display.clone()
+            };
             return Ok(TickEntry {
                 agent_id:           idx,
                 agent_pos:          self.agents[idx].pos,
                 agent_name:         self.agents[idx].name().to_string(),
                 location:           loc_name,
-                action_line:        format!("(busy — {} tick{} remaining)", ticks_left, if ticks_left == 1 { "" } else { "s" }),
+                action_line:        format!("{} ({} tick{} remaining)", display_name, ticks_left, if ticks_left == 1 { "" } else { "s" }),
                 outcome_line:       String::new(),
                 outcome_tier_label: None,
                 llm_duration_ms:    None,
+                is_busy:            true,
             });
         }
 
@@ -692,10 +702,20 @@ impl World {
             action::parse_response(&raw)
         };
 
-        let action   = self.validate(idx, action);
-        let tile     = self.tile_at(self.agents[idx].pos);
-        let loc_name = self.tile_name(tile);
-        let mut entry = self.resolve_and_apply(idx, action, &loc_name, tick, day, tod, is_night, description).await?;
+        let action      = self.validate(idx, action);
+        let action_name = action.name().to_string();
+        let tile        = self.tile_at(self.agents[idx].pos);
+        let loc_name    = self.tile_name(tile);
+        let mut entry   = self.resolve_and_apply(idx, action, &loc_name, tick, day, tod, is_night, description).await?;
+
+        // Track recent actions for repeat-penalty and prompt context
+        {
+            let window = self.config.actions.cast_intent.repeat_window.unwrap_or(5).max(10);
+            self.agents[idx].last_actions.push_front(action_name);
+            while self.agents[idx].last_actions.len() > window {
+                self.agents[idx].last_actions.pop_back();
+            }
+        }
 
         if let Some(r) = reason.filter(|r| !r.is_empty()) {
             entry.outcome_line = format!("{}\n({})", entry.outcome_line, r);
@@ -847,6 +867,7 @@ impl World {
                         outcome_line:       format!("{} is already at {}.", self.agents[idx].name(), arrived),
                         outcome_tier_label: None,
                         llm_duration_ms:    None,
+                        is_busy:            false,
                     });
                 }
 
@@ -865,6 +886,7 @@ impl World {
                         outcome_line:       format!("{} moves toward {}.", self.agents[idx].name(), destination),
                         outcome_tier_label: None,
                         llm_duration_ms:    None,
+                        is_busy:            false,
                     })
                 } else {
                     Ok(TickEntry {
@@ -876,6 +898,7 @@ impl World {
                         outcome_line:       format!("{} wanders, unable to find {}.", self.agents[idx].name(), destination),
                         outcome_tier_label: None,
                         llm_duration_ms:    None,
+                        is_busy:            false,
                     })
                 }
             }
@@ -909,6 +932,7 @@ impl World {
                     outcome_line:       format!("{} is whispering about {}.", name, about),
                     outcome_tier_label: None,
                     llm_duration_ms:    None,
+                    is_busy:            false,
                 })
             }
 
@@ -966,6 +990,7 @@ impl World {
                     outcome_line:       format!("{} sits in stillness.", name),
                     outcome_tier_label: None,
                     llm_duration_ms:    None,
+                    is_busy:            false,
                 })
             }
 
@@ -1020,6 +1045,7 @@ impl World {
                     outcome_line:       format!("{} shares wisdom with {}: \"{}\"", teacher_name, target_name, snippet),
                     outcome_tier_label: None,
                     llm_duration_ms:    None,
+                    is_busy:            false,
                 })
             }
 
@@ -1027,9 +1053,10 @@ impl World {
             Action::Sleep => {
                 let duration     = self.config.actions.sleep.duration_ticks.unwrap_or(16);
                 let energy_ptick = self.config.actions.sleep.energy_restore_per_tick.unwrap_or(6.25);
-                self.agents[idx].busy_ticks        = duration - 1;
-                self.agents[idx].sleep_energy_tick = Some(energy_ptick);
-                self.agents[idx].needs.energy     += energy_ptick;
+                self.agents[idx].busy_ticks             = duration - 1;
+                self.agents[idx].sleep_energy_tick      = Some(energy_ptick);
+                self.agents[idx].current_action_display = "Sleep".to_string();
+                self.agents[idx].needs.energy          += energy_ptick;
                 self.agents[idx].needs.clamp();
                 let mem = format!("Tick {tick} | Day {day} | {tod} | Fell asleep");
                 let buf = self.config.memory.buffer_size;
@@ -1043,6 +1070,7 @@ impl World {
                     outcome_line:       format!("{} falls into a deep sleep.", self.agents[idx].name()),
                     outcome_tier_label: None,
                     llm_duration_ms:    None,
+                    is_busy:            false,
                 })
             }
 
@@ -1062,8 +1090,9 @@ impl World {
                 };
 
                 if res.duration > 1 {
-                    self.agents[idx].busy_ticks        = res.duration - 1;
-                    self.agents[idx].sleep_energy_tick = None;
+                    self.agents[idx].busy_ticks             = res.duration - 1;
+                    self.agents[idx].sleep_energy_tick      = None;
+                    self.agents[idx].current_action_display = action.display();
                 }
 
                 let pos = self.agents[idx].pos;
@@ -1157,6 +1186,7 @@ impl World {
                     outcome_line:       narrative,
                     outcome_tier_label: if res.dc > 0 { Some(tier_label) } else { None },
                     llm_duration_ms:    None,
+                    is_busy:            false,
                 })
             }
         }
@@ -1226,6 +1256,7 @@ impl World {
                     outcome_line:       format!("{} looks around for {} but finds no one.", self.agents[idx].name(), target),
                     outcome_tier_label: None,
                     llm_duration_ms:    None,
+                    is_busy:            false,
                 });
             }
         };
@@ -1321,6 +1352,7 @@ impl World {
             outcome_line,
             outcome_tier_label: if res.dc > 0 { Some(tier_label) } else { None },
             llm_duration_ms:    None,
+            is_busy:            false,
         })
     }
 
@@ -1361,12 +1393,25 @@ impl World {
         let interpreted  = magic::parse_interpreter_response(&raw)
             .unwrap_or_else(|| magic::fallback_intent(intent, energy_drain));
 
-        let duration     = interpreted.clamped_duration(&self.config);
-        let need_changes = interpreted.to_need_changes(&self.config);
+        let duration        = interpreted.clamped_duration(&self.config);
+        let mut need_changes = interpreted.to_need_changes(&self.config);
+
+        // Repeat penalty: extra energy drain for recent cast_intent spam
+        let repeat_window  = self.config.actions.cast_intent.repeat_window.unwrap_or(5);
+        let penalty_each   = self.config.actions.cast_intent.repeat_energy_penalty.unwrap_or(4.0);
+        let repeat_count   = self.agents[idx].last_actions.iter()
+            .take(repeat_window)
+            .filter(|a| a.as_str() == "Cast Intent")
+            .count();
+        if repeat_count > 0 {
+            let current_drain = need_changes.energy.unwrap_or(0.0);
+            need_changes.energy = Some(current_drain - repeat_count as f32 * penalty_each);
+        }
 
         if duration > 1 {
-            self.agents[idx].busy_ticks        = duration - 1;
-            self.agents[idx].sleep_energy_tick = None;
+            self.agents[idx].busy_ticks             = duration - 1;
+            self.agents[idx].sleep_energy_tick      = None;
+            self.agents[idx].current_action_display = format!("Cast Intent: \"{}\"", intent);
         }
 
         self.agents[idx].needs.apply(&need_changes);
@@ -1447,6 +1492,7 @@ impl World {
             outcome_line:       full_outcome,
             outcome_tier_label: None,
             llm_duration_ms:    None,
+            is_busy:            false,
         })
     }
 
@@ -1499,6 +1545,7 @@ impl World {
             outcome_line:       format!("{} kneels and speaks a quiet prayer.", name),
             outcome_tier_label: None,
             llm_duration_ms:    None,
+            is_busy:            false,
         })
     }
 
@@ -1528,6 +1575,7 @@ impl World {
                 outcome_line:       format!("{} approaches the altar, but the message has faded.", name),
                 outcome_tier_label: None,
                 llm_duration_ms:    None,
+                is_busy:            false,
             });
         }
 
@@ -1590,6 +1638,7 @@ impl World {
             outcome_line:       reaction,
             outcome_tier_label: None,
             llm_duration_ms:    None,
+            is_busy:            false,
         })
     }
 
@@ -1660,6 +1709,7 @@ impl World {
                 admirer_name, admired_name),
             outcome_tier_label: None,
             llm_duration_ms:    None,
+            is_busy:            false,
         })
     }
 
@@ -1683,47 +1733,90 @@ impl World {
             runlog::append_praise(&self.souls_dir, &name, &run_id, day, tick, tod, praise_text);
         }
 
-        // Classify sincerity via LLM
+        // Evaluate praise quality via LLM (same tier system as prayer eval)
         let classify_prompt = format!(
-            "Does the following text contain sincere praise toward the creator of a simulated world?\n\
+            "Score the following praise offered to the creator of a simulated world.\n\
              Text: \"{}\"\n\
-             Reply with JSON only: {{\"sincere\": true}} or {{\"sincere\": false}}",
+             Reply with JSON only: {{\"score\": 1-5, \"quality\": \"hollow|sincere|heartfelt|transcendent\"}}",
             praise_text
         );
         let call_seed = Some(self.seed.wrapping_add(self.llm_call_counter));
         self.llm_call_counter += 1;
         let llm = Arc::clone(&self.llm);
-        let raw = llm.generate(&classify_prompt, 32, call_seed, None, None).await.unwrap_or_default();
+        let raw = llm.generate(&classify_prompt, 64, call_seed, None, None).await.unwrap_or_default();
         self.log_llm_call("praise_classify", &name, &classify_prompt, &raw);
 
-        let sincere = raw.contains("\"sincere\": true") || raw.contains("\"sincere\":true");
+        let dp_cfg = self.config.needs.daily_praise.clone();
 
-        let (outcome, need_changes) = if sincere {
-            let cfg = &self.config.actions.praise;
-            let nc = crate::agent::NeedChanges {
-                fun:    cfg.fun_restore,
-                energy: cfg.energy_restore,
-                social: cfg.social_restore,
-                ..Default::default()
-            };
-            ("A warmth fills your chest. The Creator has heard your praise.".to_string(), nc)
+        // Repetition check: Jaccard word-overlap against recent praises
+        let max_sim = self.agents[idx].recent_praises.iter()
+            .map(|p| jaccard_word_overlap(praise_text, p))
+            .fold(0.0_f32, f32::max);
+        let is_repetitive = max_sim > dp_cfg.praise_repeat_threshold;
+
+        let raw_quality = parse_json_quality_field(&raw);
+        let quality = if is_repetitive {
+            // Downgrade tier by one step for repetitive praise
+            match raw_quality.as_str() {
+                "transcendent" => "heartfelt".to_string(),
+                "heartfelt"    => "sincere".to_string(),
+                _              => "hollow".to_string(),
+            }
         } else {
-            let nc = crate::agent::NeedChanges {
-                fun: Some(2.0),
-                ..Default::default()
-            };
-            ("You speak words into the stillness.".to_string(), nc)
+            raw_quality
+        };
+        let repetition_note = if is_repetitive {
+            "\n[The Creator senses these words have been spoken before.]"
+        } else {
+            ""
         };
 
+        let (mult, dev_gain): (f32, f32) = match quality.as_str() {
+            "transcendent" => (2.5, dp_cfg.devotion_gain_transcendent),
+            "heartfelt"    => (1.5, dp_cfg.devotion_gain_heartfelt),
+            "sincere"      => (1.0, dp_cfg.devotion_gain_sincere),
+            _              => (0.3, 0.0),
+        };
+
+        let cfg = self.config.actions.praise.clone();
+        let need_changes = crate::agent::NeedChanges {
+            fun:    cfg.fun_restore.map(|v| v * mult),
+            energy: cfg.energy_restore.map(|v| v * mult),
+            social: cfg.social_restore.map(|v| v * mult),
+            ..Default::default()
+        };
         self.agents[idx].needs.apply(&need_changes);
+        self.agents[idx].devotion = (self.agents[idx].devotion + dev_gain).clamp(0.0, 100.0);
+
+        // Set cooldown based on quality tier
+        self.agents[idx].praise_ticks_remaining = match quality.as_str() {
+            "transcendent" => dp_cfg.praise_cooldown_transcendent,
+            "heartfelt"    => dp_cfg.praise_cooldown_heartfelt,
+            "sincere"      => dp_cfg.praise_cooldown_sincere,
+            _              => dp_cfg.praise_cooldown_hollow,
+        };
+
+        // Track recent praises for repetition detection
+        let repeat_window = dp_cfg.praise_repeat_window;
+        self.agents[idx].recent_praises.push_front(praise_text.to_string());
+        while self.agents[idx].recent_praises.len() > repeat_window {
+            self.agents[idx].recent_praises.pop_back();
+        }
+
+        let outcome = match quality.as_str() {
+            "transcendent" => format!("Light fills the space around you. The Creator is deeply moved.{}", repetition_note),
+            "heartfelt"    => format!("A warmth fills your chest. The Creator has heard your praise.{}", repetition_note),
+            "sincere"      => format!("Your words are heard. The Creator acknowledges your sincerity.{}", repetition_note),
+            _              => format!("You speak words into the stillness.{}", repetition_note),
+        };
 
         let praise_short = &praise_text[..praise_text.len().min(60)];
         let mem = format!("Tick {tick} | Day {day} | {tod} | Praised: \"{praise_short}\"");
         let buf = self.config.memory.buffer_size;
         self.agents[idx].push_memory(mem, buf);
 
-        if sincere {
-            let ev = format!("Day {day}: {name} offered sincere praise");
+        if matches!(quality.as_str(), "sincere" | "heartfelt" | "transcendent") {
+            let ev = format!("Day {day}: {name} offered {} praise", quality);
             self.notable_events.push((idx, ev));
         }
 
@@ -1736,6 +1829,7 @@ impl World {
             outcome_line:       format!("{}\n[{}]", outcome, need_changes.describe()),
             outcome_tier_label: None,
             llm_duration_ms:    None,
+            is_busy:            false,
         })
     }
 
@@ -1834,6 +1928,7 @@ impl World {
             outcome_line:       format!("{}\n{}\n[{}]", haiku, outcome_prefix, need_changes.describe()),
             outcome_tier_label: None,
             llm_duration_ms:    None,
+            is_busy:            false,
         })
     }
 
@@ -1954,7 +2049,7 @@ impl World {
             nearby.join(", ")
         };
 
-        let memory_str: Vec<String> = agent.memory.iter().take(8).cloned().collect();
+        let memory_str: Vec<String> = agent.memory.iter().take(12).cloned().collect();
         let memory_block = if memory_str.is_empty() {
             "  (no memories yet)".to_string()
         } else {
@@ -2080,6 +2175,47 @@ impl World {
             format!("\nBELIEFS ABOUT OTHERS:\n{}\n", belief_lines.join("\n"))
         };
 
+        // Recent actions and repeat-penalty nudge
+        let repeat_window_cfg = self.config.actions.cast_intent.repeat_window.unwrap_or(5);
+        let cast_repeat_count = agent.last_actions.iter()
+            .take(repeat_window_cfg)
+            .filter(|a| a.as_str() == "Cast Intent")
+            .count();
+        let recent_actions_str = if agent.last_actions.is_empty() {
+            "(none yet)".to_string()
+        } else {
+            agent.last_actions.iter().cloned().collect::<Vec<_>>().join(", ")
+        };
+        let magic_repeat_nudge = if cast_repeat_count >= 2 {
+            format!(
+                "\nYou have cast intent {} times recently. Let magic rest; tend to your body, your bonds, or the world around you.",
+                cast_repeat_count
+            )
+        } else {
+            String::new()
+        };
+
+        // Mandatory praise nudge
+        let praise_nudge = if self.agents[idx].praise_ticks_remaining == 0 {
+            let recent_list = if self.agents[idx].recent_praises.is_empty() {
+                "(none yet)".to_string()
+            } else {
+                self.agents[idx].recent_praises.iter()
+                    .take(3)
+                    .map(|p| format!("\"{}\"", &p[..p.len().min(50)]))
+                    .collect::<Vec<_>>()
+                    .join("; ")
+            };
+            format!(
+                "\nDIVINE MANDATE: {} demands praise before you do anything else. \
+                 Speak from your heart — hollow repetition offends the Creator. \
+                 Recent praises you have given: {}\n",
+                god_name, recent_list
+            )
+        } else {
+            String::new()
+        };
+
         format!(
             r#"You are {name}. {personality}
 
@@ -2109,12 +2245,14 @@ VIEWPORT (you are [X]):
 RECENT MEMORY (newest first):
 {memory}{last_action_note}
 
+RECENT ACTIONS (newest first): {recent_actions_str}
+Choose something meaningfully different — repetition dulls the soul.{magic_repeat_nudge}
+{praise_nudge}
 AVAILABLE ACTIONS:
 {actions}{needs_suggestions}
 Magic is real and available to you at any time via cast_intent.
 Speak your desire and it will manifest — though words carry all their meanings.
 {magic_nudge}{oracle_nudge}
-Avoid repeating the same action twice in a row. Your personality should guide what you do.
 
 Choose ONE action. Respond with ONLY a JSON object:
 {{"action": "action_name", "target": "agent name (required for gossip/chat/teach/admire)", "intent": "if casting, your spoken desire or gossip rumor content", "reason": "brief reason", "description": "in your own words — what are you doing and why does it matter to you"}}"#,
@@ -2148,9 +2286,12 @@ Choose ONE action. Respond with ONLY a JSON object:
             memory           = memory_block,
             last_action_note = last_action_note,
             actions          = actions_str,
-            needs_suggestions = needs_suggestions,
-            magic_nudge      = magic_nudge,
-            oracle_nudge     = oracle_nudge,
+            needs_suggestions   = needs_suggestions,
+            magic_nudge         = magic_nudge,
+            oracle_nudge        = oracle_nudge,
+            recent_actions_str  = recent_actions_str,
+            magic_repeat_nudge  = magic_repeat_nudge,
+            praise_nudge        = praise_nudge,
         )
     }
 
@@ -3218,6 +3359,17 @@ fn parse_json_quality_field(raw: &str) -> String {
         }
     }
     "sincere".to_string()
+}
+
+/// Compute Jaccard word-overlap similarity between two strings (case-insensitive).
+fn jaccard_word_overlap(a: &str, b: &str) -> f32 {
+    let words_a: std::collections::HashSet<&str> = a.split_whitespace().collect();
+    let words_b: std::collections::HashSet<&str> = b.split_whitespace().collect();
+    if words_a.is_empty() && words_b.is_empty() { return 0.0; }
+    let intersection = words_a.intersection(&words_b).count();
+    let union = words_a.len() + words_b.len() - intersection;
+    if union == 0 { return 0.0; }
+    intersection as f32 / union as f32
 }
 
 // ---------------------------------------------------------------------------

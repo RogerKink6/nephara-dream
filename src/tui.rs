@@ -1020,7 +1020,11 @@ impl TuiApp {
                             Style::default().fg(loc_color),
                         ),
                         Span::raw(format!(" {} │ ", pos_str)),
-                        Span::raw(snap.action_line.clone()),
+                        if snap.is_busy {
+                            Span::styled(snap.action_line.clone(), Style::default().fg(Color::Yellow))
+                        } else {
+                            Span::raw(snap.action_line.clone())
+                        },
                     ];
 
                     if let Some(ref tier) = snap.outcome_tier_label {
