@@ -171,6 +171,12 @@ fun_restore    = 6.0
 energy_drain   = 3.0
 dc             = 0
 
+[actions.admire]
+description    = "Express heartfelt admiration for a nearby person"
+fun_restore    = 8.0
+social_restore = 10.0
+dc             = 0
+
 [agent]
 beliefs_max_per_agent   = 5   # max rumors stored per agent-about-agent pair
 beliefs_in_prompt_count = 3   # how many beliefs to inject per agent into prompt

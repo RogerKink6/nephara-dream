@@ -715,6 +715,23 @@ impl World {
                 }
             }
 
+            Action::Admire { admired_name } => {
+                let nearby = self.agents.iter().any(|a| {
+                    a.id != idx
+                        && a.name().eq_ignore_ascii_case(&admired_name)
+                        && Self::chebyshev_dist(a.pos, pos) <= 1
+                        && !a.is_busy()
+                });
+                if nearby { return Action::Admire { admired_name }; }
+                // Fallback: admire any nearby non-busy agent
+                if let Some(a) = self.agents.iter().find(|a| {
+                    a.id != idx && Self::chebyshev_dist(a.pos, pos) <= 1 && !a.is_busy()
+                }) {
+                    return Action::Admire { admired_name: a.name().to_string() };
+                }
+                self.wander_action(idx)
+            }
+
             other => other,
         }
     }
@@ -898,6 +915,11 @@ impl World {
                     outcome_tier_label: None,
                     llm_duration_ms:    None,
                 })
+            }
+
+            // ---- Admire ----
+            Action::Admire { admired_name } => {
+                self.resolve_admire(idx, &admired_name, loc_name, tick, day, tod).await
             }
 
             // ---- Teach ----
@@ -1505,6 +1527,67 @@ impl World {
             location:           loc_name.to_string(),
             action_line:        "Read Oracle".to_string(),
             outcome_line:       reaction,
+            outcome_tier_label: None,
+            llm_duration_ms:    None,
+        })
+    }
+
+    // -----------------------------------------------------------------------
+    // Admire resolution (FEAT-24)
+    // -----------------------------------------------------------------------
+
+    async fn resolve_admire(
+        &mut self,
+        idx:          usize,
+        admired_name: &str,
+        loc_name:     &str,
+        tick:         u32,
+        day:          u32,
+        tod:          &str,
+    ) -> Result<TickEntry, Box<dyn std::error::Error + Send + Sync>> {
+        let admirer_name = self.agents[idx].name().to_string();
+
+        let cfg = self.config.actions.admire.clone();
+        let admirer_changes = crate::agent::NeedChanges {
+            fun:    cfg.fun_restore,
+            social: cfg.social_restore,
+            ..Default::default()
+        };
+        let admired_changes = crate::agent::NeedChanges {
+            social: Some(15.0),
+            energy: Some(5.0),
+            ..Default::default()
+        };
+
+        // Apply to admirer
+        self.agents[idx].needs.apply(&admirer_changes);
+        let buf = self.config.memory.buffer_size;
+        let mem_admirer = format!("Tick {tick} | Day {day} | {tod} | Admired {admired_name}");
+        self.agents[idx].push_memory(mem_admirer, buf);
+
+        // Apply to admired agent
+        if let Some(tidx) = self.agents.iter().position(|a| a.name().eq_ignore_ascii_case(admired_name)) {
+            self.agents[tidx].needs.apply(&admired_changes);
+            let mem_admired = format!("Tick {tick} | Day {day} | {tod} | {admirer_name} expressed admiration for you");
+            self.agents[tidx].push_memory(mem_admired, buf);
+        }
+
+        if !self.is_test_run {
+            let run_id = self.run_log.run_id.clone();
+            let entry = format!("From {}: expressed heartfelt admiration.", admirer_name);
+            runlog::append_admiration(&self.souls_dir, admired_name, &run_id, day, tick, tod, &entry);
+        }
+
+        let admirer_note = admirer_changes.describe();
+        let admired_note = admired_changes.describe();
+        Ok(TickEntry {
+            agent_id:           idx,
+            agent_pos:          self.agents[idx].pos,
+            agent_name:         admirer_name.clone(),
+            location:           loc_name.to_string(),
+            action_line:        format!("Admire {}", admired_name),
+            outcome_line:       format!("{} expresses admiration for {}. [{admirer_note}] | {admired_name} [{admired_note}]",
+                admirer_name, admired_name),
             outcome_tier_label: None,
             llm_duration_ms:    None,
         })
@@ -2332,6 +2415,7 @@ Respond ONLY with JSON — no other text:
             a.id != idx && Self::chebyshev_dist(a.pos, pos) <= 1 && !a.is_busy()
         }) {
             v.push("teach");
+            v.push("admire");
         }
         if tile == TileType::Temple && self.agents[idx].oracle_pending {
             v.push("read_oracle");
@@ -2423,7 +2507,7 @@ Respond ONLY with JSON — no other text:
                 other_names.join("/")));
         }
 
-        // Teach requires a nearby agent; uses target: agent name, intent: the lesson
+        // Teach and Admire require a nearby agent; use target: agent name
         let nearby_names: Vec<String> = self.agents.iter()
             .filter(|a| a.id != idx && Self::chebyshev_dist(a.pos, pos) <= 1 && !a.is_busy())
             .map(|a| a.name().to_string())
@@ -2432,6 +2516,10 @@ Respond ONLY with JSON — no other text:
             v.push(format!("teach — share knowledge with a nearby person (+{:.0} social +{:.0} fun, always works). Use target: name of the person ({}), intent: what you are teaching.",
                 cfg.actions.teach.social_restore.unwrap_or(0.0),
                 cfg.actions.teach.fun_restore.unwrap_or(0.0),
+                nearby_names.join("/")));
+            v.push(format!("admire — express heartfelt admiration for a nearby person (+{:.0} fun +{:.0} social for you; they gain +15 social +5 energy, always works). Use target: name of the person ({}).",
+                cfg.actions.admire.fun_restore.unwrap_or(0.0),
+                cfg.actions.admire.social_restore.unwrap_or(0.0),
                 nearby_names.join("/")));
         }
 

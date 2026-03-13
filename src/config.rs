@@ -92,6 +92,7 @@ pub struct ActionsConfig {
     pub gossip:       ActionConfig,
     pub meditate:     ActionConfig,
     pub teach:        ActionConfig,
+    pub admire:       ActionConfig,
 }
 
 #[derive(Debug, Deserialize, Clone, Default)]

@@ -55,6 +55,8 @@ pub enum Action {
     Meditate,
     /// Teach another nearby agent, sharing knowledge (both get social/fun boost).
     Teach { about: String, lesson: String },
+    /// Admire a nearby agent (FEAT-24).
+    Admire { admired_name: String },
     /// Fallback when requested action fails validation.
     Wander,
 }
@@ -82,6 +84,7 @@ impl Action {
             Action::Gossip { .. }     => "Gossip",
             Action::Meditate          => "Meditate",
             Action::Teach { .. }      => "Teach",
+            Action::Admire { .. }     => "Admire",
             Action::Wander            => "Wander",
         }
     }
@@ -97,6 +100,7 @@ impl Action {
             Action::ReadOracle                 => "Read Oracle".to_string(),
             Action::Gossip { about, .. }       => format!("Gossip about {}", about),
             Action::Teach { about, .. }        => format!("Teach {}", about),
+            Action::Admire { admired_name }    => format!("Admire {}", admired_name),
             other => other.name().to_string(),
         }
     }
@@ -308,6 +312,7 @@ pub fn action_cfg_and_attr<'a>(action: &Action, config: &'a Config) -> (&'a Acti
         Action::Gossip { .. }    => (&config.actions.gossip,       ""),
         Action::Meditate         => (&config.actions.meditate,     ""),
         Action::Teach { .. }     => (&config.actions.teach,        "heart"),
+        Action::Admire { .. }    => (&config.actions.admire,       "heart"),
         Action::Wander           => (&config.actions.rest,        ""),
     }
 }
@@ -469,6 +474,15 @@ pub fn action_from_name(name: &str, target: Option<&str>, intent: Option<&str>) 
                 Action::Wander
             } else {
                 Action::Teach { about, lesson }
+            }
+        }
+        "admire" => {
+            let name = target.unwrap_or("").to_string();
+            if name.is_empty() {
+                tracing::warn!("Admire action with no target, defaulting to Wander");
+                Action::Wander
+            } else {
+                Action::Admire { admired_name: name }
             }
         }
         other => {

@@ -331,6 +331,30 @@ pub fn append_praise(
 }
 
 // ---------------------------------------------------------------------------
+// Admiration persistence (FEAT-24)
+// ---------------------------------------------------------------------------
+
+pub fn append_admiration(
+    souls_dir:    &str,
+    agent_name:   &str,
+    run_id:       &str,
+    day:          u32,
+    tick:         u32,
+    tod:          &str,
+    content:      &str,
+) {
+    let path  = format!("{}/{}.admirations.md", souls_dir, agent_name.to_lowercase());
+    let date  = Local::now().format("%Y-%m-%d");
+    let header = format!("## Run {} | Day {} | Tick {} | {} | {}", run_id, day, tick, tod, date);
+    let entry = format!("\n{}\n{}\n", header, content);
+    let file  = OpenOptions::new().create(true).append(true).open(&path);
+    match file {
+        Ok(mut f) => { let _ = f.write_all(entry.as_bytes()); }
+        Err(e)    => warn!("Could not append admiration for {}: {}", agent_name, e),
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Haiku persistence (FEAT-16)
 // ---------------------------------------------------------------------------
 

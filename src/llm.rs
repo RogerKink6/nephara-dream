@@ -687,6 +687,9 @@ fn mock_actions(rng: &mut StdRng) -> &'static str {
         r#"{"action":"meditate","target":null,"intent":null,"reason":"seeking stillness"}"#,
         r#"{"action":"teach","target":"Rowan","intent":"how to read the stars on a clear night","reason":"sharing what I know"}"#,
         r#"{"action":"teach","target":"Elara","intent":"a simple breathing practice for calm","reason":"she seemed troubled"}"#,
+        r#"{"action":"admire","target":"Rowan","intent":null,"reason":"she has a kind and steady presence"}"#,
+        r#"{"action":"admire","target":"Elara","intent":null,"reason":"her curiosity inspires me"}"#,
+        r#"{"action":"admire","target":"Thane","intent":null,"reason":"his quiet strength is something I respect"}"#,
     ];
     let idx = rng.gen_range(0..choices.len());
     choices[idx]
