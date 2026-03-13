@@ -90,11 +90,14 @@ pub struct ActionsConfig {
     pub praise:       ActionConfig,
     pub compose:      ActionConfig,
     pub gossip:       ActionConfig,
+    pub meditate:     ActionConfig,
+    pub teach:        ActionConfig,
 }
 
 #[derive(Debug, Deserialize, Clone, Default)]
 pub struct ActionConfig {
     #[serde(default)] pub hunger_restore:          Option<f32>,
+    #[serde(default)] pub hunger_drain:            Option<f32>,
     #[serde(default)] pub energy_restore:          Option<f32>,
     #[serde(default)] pub energy_restore_per_tick: Option<f32>,
     #[serde(default)] pub energy_drain:            Option<f32>,

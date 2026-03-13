@@ -873,6 +873,82 @@ impl World {
                 self.resolve_read_oracle(idx, loc_name, tick, day, tod).await
             }
 
+            // ---- Meditate ----
+            Action::Meditate => {
+                let cfg = self.config.actions.meditate.clone();
+                let need_changes = crate::agent::NeedChanges {
+                    energy:  cfg.energy_restore,
+                    fun:     cfg.fun_restore,
+                    hunger:  cfg.hunger_drain.map(|d| -d),
+                    ..Default::default()
+                };
+                self.agents[idx].needs.apply(&need_changes);
+                let name = self.agents[idx].name().to_string();
+                let needs_note = need_changes.describe();
+                let mem = format!("Tick {tick} | Day {day} | {tod} | Meditated [{needs_note}]");
+                let buf = self.config.memory.buffer_size;
+                self.agents[idx].push_memory(mem, buf);
+                Ok(TickEntry {
+                    agent_id:           idx,
+                    agent_pos:          self.agents[idx].pos,
+                    agent_name:         name.clone(),
+                    location:           loc_name.to_string(),
+                    action_line:        "Meditate".to_string(),
+                    outcome_line:       format!("{} sits in stillness.", name),
+                    outcome_tier_label: None,
+                    llm_duration_ms:    None,
+                })
+            }
+
+            // ---- Teach ----
+            Action::Teach { about, lesson } => {
+                let pos = self.agents[idx].pos;
+                // Find target agent by name (case-insensitive), must be nearby
+                let target_idx = self.agents.iter().position(|a| {
+                    a.id != idx
+                        && a.name().eq_ignore_ascii_case(&about)
+                        && Self::chebyshev_dist(a.pos, pos) <= 1
+                });
+                let Some(tidx) = target_idx else {
+                    // Target not found or not nearby — fall back to wander
+                    let wander = self.wander_action(idx);
+                    return Box::pin(self.resolve_and_apply(idx, wander, loc_name, tick, day, tod, is_night, None)).await;
+                };
+
+                let cfg = self.config.actions.teach.clone();
+                let need_changes = crate::agent::NeedChanges {
+                    social:  cfg.social_restore,
+                    fun:     cfg.fun_restore,
+                    energy:  cfg.energy_drain.map(|d| -d),
+                    ..Default::default()
+                };
+
+                // Apply to teacher
+                self.agents[idx].needs.apply(&need_changes);
+                let teacher_name = self.agents[idx].name().to_string();
+                let mem_teacher = format!("Tick {tick} | Day {day} | {tod} | Taught {about}: \"{lesson}\"");
+                let buf = self.config.memory.buffer_size;
+                self.agents[idx].push_memory(mem_teacher, buf);
+
+                // Apply to learner
+                self.agents[tidx].needs.apply(&need_changes);
+                let target_name = self.agents[tidx].name().to_string();
+                let mem_learner = format!("Tick {tick} | Day {day} | {tod} | Was taught by {teacher_name}: \"{lesson}\"");
+                self.agents[tidx].push_memory(mem_learner, buf);
+
+                let snippet = &lesson[..lesson.len().min(60)];
+                Ok(TickEntry {
+                    agent_id:           idx,
+                    agent_pos:          self.agents[idx].pos,
+                    agent_name:         teacher_name.clone(),
+                    location:           loc_name.to_string(),
+                    action_line:        format!("Teach {}", target_name),
+                    outcome_line:       format!("{} shares wisdom with {}: \"{}\"", teacher_name, target_name, snippet),
+                    outcome_tier_label: None,
+                    llm_duration_ms:    None,
+                })
+            }
+
             // ---- Sleep ----
             Action::Sleep => {
                 let duration     = self.config.actions.sleep.duration_ticks.unwrap_or(16);
@@ -2251,6 +2327,12 @@ Respond ONLY with JSON — no other text:
         v.push("praise");
         v.push("compose");
         v.push("gossip");
+        v.push("meditate");
+        if self.agents.iter().any(|a| {
+            a.id != idx && Self::chebyshev_dist(a.pos, pos) <= 1 && !a.is_busy()
+        }) {
+            v.push("teach");
+        }
         if tile == TileType::Temple && self.agents[idx].oracle_pending {
             v.push("read_oracle");
         }
@@ -2325,6 +2407,10 @@ Respond ONLY with JSON — no other text:
             }
         }
 
+        v.push(format!("meditate — sit in stillness, quiet the mind (+{:.0} energy +{:.0} fun, always works)",
+            cfg.actions.meditate.energy_restore.unwrap_or(0.0),
+            cfg.actions.meditate.fun_restore.unwrap_or(0.0)));
+
         // Gossip names a known OTHER agent in target, rumor content in intent
         let other_names: Vec<String> = self.agents.iter()
             .filter(|a| a.id != idx)
@@ -2335,6 +2421,18 @@ Respond ONLY with JSON — no other text:
                 cfg.actions.gossip.social_restore.unwrap_or(0.0),
                 cfg.actions.gossip.fun_restore.unwrap_or(0.0),
                 other_names.join("/")));
+        }
+
+        // Teach requires a nearby agent; uses target: agent name, intent: the lesson
+        let nearby_names: Vec<String> = self.agents.iter()
+            .filter(|a| a.id != idx && Self::chebyshev_dist(a.pos, pos) <= 1 && !a.is_busy())
+            .map(|a| a.name().to_string())
+            .collect();
+        if !nearby_names.is_empty() {
+            v.push(format!("teach — share knowledge with a nearby person (+{:.0} social +{:.0} fun, always works). Use target: name of the person ({}), intent: what you are teaching.",
+                cfg.actions.teach.social_restore.unwrap_or(0.0),
+                cfg.actions.teach.fun_restore.unwrap_or(0.0),
+                nearby_names.join("/")));
         }
 
         v.push(format!("pray — speak sincerely to the divine (+{:.0} fun +{:.0} social, always works). Your prayer will be heard and kept by the one who made this world. They may answer you.",
@@ -2551,14 +2649,26 @@ Respond ONLY with JSON — no other text:
     // -----------------------------------------------------------------------
 
     pub fn agent_needs_snapshots(&self) -> Vec<AgentNeedsSnapshot> {
-        self.agents.iter().map(|a| AgentNeedsSnapshot {
-            agent_id:   a.id,
-            agent_name: a.name().to_string(),
-            hunger:     a.needs.hunger,
-            energy:     a.needs.energy,
-            fun:        a.needs.fun,
-            social:     a.needs.social,
-            hygiene:    a.needs.hygiene,
+        self.agents.iter().map(|a| {
+            let memories: Vec<String> = a.memory.iter().take(3).cloned().collect();
+            let beliefs: Vec<(String, String)> = a.beliefs.iter()
+                .filter_map(|(about, ab)| {
+                    ab.rumors.last().map(|r| (about.clone(), r.clone()))
+                })
+                .take(3)
+                .collect();
+            AgentNeedsSnapshot {
+                agent_id:   a.id,
+                agent_name: a.name().to_string(),
+                agent_pos:  a.pos,
+                hunger:     a.needs.hunger,
+                energy:     a.needs.energy,
+                fun:        a.needs.fun,
+                social:     a.needs.social,
+                hygiene:    a.needs.hygiene,
+                memories,
+                beliefs,
+            }
         }).collect()
     }
 

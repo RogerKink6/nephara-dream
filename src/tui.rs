@@ -91,6 +91,8 @@ pub struct TuiApp {
     should_quit:          bool,
     roster:               Vec<(String, Color)>,
     show_legend:          bool,
+    show_help:            bool,
+    inspected_agent:      Option<usize>,
     /// When true, manual scrolling has occurred and auto-scroll is paused.
     scroll_locked:        bool,
     /// Maps agent_id → index of a pending "thinking..." log entry.
@@ -135,6 +137,8 @@ impl TuiApp {
             should_quit:         false,
             roster,
             show_legend:         false,
+            show_help:           false,
+            inspected_agent:     None,
             scroll_locked:       false,
             thinking_entry_idx:  HashMap::new(),
             log_wrap_width:      60,
@@ -387,6 +391,17 @@ impl TuiApp {
                 self.toggle_expand(self.selected);
             }
             (_, KeyCode::Char('l')) => { self.show_legend = !self.show_legend; }
+            (_, KeyCode::Char('?')) => { self.show_help = !self.show_help; }
+            (_, KeyCode::Char(c @ '1'..='5')) => {
+                let idx = (c as usize) - ('1' as usize);
+                if idx < self.agent_count {
+                    if self.inspected_agent == Some(idx) {
+                        self.inspected_agent = None;
+                    } else {
+                        self.inspected_agent = Some(idx);
+                    }
+                }
+            }
             _ => {}
         }
     }
@@ -473,6 +488,14 @@ impl TuiApp {
         self.render_map(f, main[0]);
         self.render_log(f, main[1]);
         self.render_needs(f, outer[2]);
+
+        // Overlays (rendered on top)
+        if self.show_help {
+            self.render_help_overlay(f, area);
+        }
+        if let Some(agent_idx) = self.inspected_agent {
+            self.render_inspect_panel(f, main[1], agent_idx);
+        }
     }
 
     fn render_map(&self, f: &mut ratatui::Frame, area: ratatui::layout::Rect) {
@@ -650,6 +673,136 @@ impl TuiApp {
 
         let para = Paragraph::new(lines);
         f.render_widget(para, inner);
+    }
+
+    fn render_help_overlay(&self, f: &mut ratatui::Frame, area: ratatui::layout::Rect) {
+        let popup_width  = 50u16;
+        let popup_height = 12u16;
+        let x = area.x + area.width.saturating_sub(popup_width) / 2;
+        let y = area.y + area.height.saturating_sub(popup_height) / 2;
+        let popup_area = Rect {
+            x, y,
+            width:  popup_width.min(area.width),
+            height: popup_height.min(area.height),
+        };
+
+        let block = Block::default()
+            .title(" KEYBINDINGS ")
+            .borders(Borders::ALL)
+            .border_style(Style::default().fg(Color::LightCyan));
+
+        let lines = vec![
+            Line::from(vec![
+                Span::styled("  q", Style::default().fg(Color::LightYellow).add_modifier(Modifier::BOLD)),
+                Span::raw("         Quit"),
+            ]),
+            Line::from(vec![
+                Span::styled("  j / k", Style::default().fg(Color::LightYellow).add_modifier(Modifier::BOLD)),
+                Span::raw("     Scroll log down/up"),
+            ]),
+            Line::from(vec![
+                Span::styled("  [ / ]", Style::default().fg(Color::LightYellow).add_modifier(Modifier::BOLD)),
+                Span::raw("     Jump to prev/next tick"),
+            ]),
+            Line::from(vec![
+                Span::styled("  Space", Style::default().fg(Color::LightYellow).add_modifier(Modifier::BOLD)),
+                Span::raw("       Expand selected entry"),
+            ]),
+            Line::from(vec![
+                Span::styled("  G", Style::default().fg(Color::LightYellow).add_modifier(Modifier::BOLD)),
+                Span::raw("           Resume auto-scroll"),
+            ]),
+            Line::from(vec![
+                Span::styled("  l", Style::default().fg(Color::LightYellow).add_modifier(Modifier::BOLD)),
+                Span::raw("           Toggle tile legend"),
+            ]),
+            Line::from(vec![
+                Span::styled("  1 – 5", Style::default().fg(Color::LightYellow).add_modifier(Modifier::BOLD)),
+                Span::raw("     Inspect agent (toggle)"),
+            ]),
+            Line::from(vec![
+                Span::styled("  ?", Style::default().fg(Color::LightYellow).add_modifier(Modifier::BOLD)),
+                Span::raw("           This help overlay"),
+            ]),
+        ];
+
+        let para = Paragraph::new(lines).block(block);
+        f.render_widget(ratatui::widgets::Clear, popup_area);
+        f.render_widget(para, popup_area);
+    }
+
+    fn render_inspect_panel(&self, f: &mut ratatui::Frame, area: ratatui::layout::Rect, agent_idx: usize) {
+        let Some(snap) = self.agent_needs.get(agent_idx) else { return; };
+
+        let panel_width  = area.width.min(50);
+        let panel_height = area.height.min(20);
+        let x = area.x + area.width.saturating_sub(panel_width);
+        let y = area.y;
+        let panel_area = Rect { x, y, width: panel_width, height: panel_height };
+
+        let agent_color = agent_color_for_id(snap.agent_id);
+        let title = format!(" {} ({},{}) ", snap.agent_name, snap.agent_pos.0, snap.agent_pos.1);
+        let block = Block::default()
+            .title(title)
+            .borders(Borders::ALL)
+            .border_style(Style::default().fg(agent_color));
+
+        let mut lines: Vec<Line> = Vec::new();
+
+        // Needs
+        lines.push(Line::from(Span::styled("NEEDS", Style::default().fg(Color::DarkGray).add_modifier(Modifier::BOLD))));
+        let needs_arr = [
+            ("Satiety", snap.hunger),
+            ("Energy",  snap.energy),
+            ("Fun",     snap.fun),
+            ("Social",  snap.social),
+            ("Hygiene", snap.hygiene),
+        ];
+        for (label, val) in &needs_arr {
+            lines.push(Line::from(vec![
+                Span::raw(format!("  {:<9}", label)),
+                need_span(*val),
+            ]));
+        }
+
+        // Memories
+        if !snap.memories.is_empty() {
+            lines.push(Line::raw(""));
+            lines.push(Line::from(Span::styled("MEMORIES", Style::default().fg(Color::DarkGray).add_modifier(Modifier::BOLD))));
+            for mem in snap.memories.iter().take(3) {
+                let truncated = if mem.len() > (panel_width as usize).saturating_sub(4) {
+                    format!("{}…", &mem[..(panel_width as usize).saturating_sub(5)])
+                } else {
+                    mem.clone()
+                };
+                lines.push(Line::from(Span::styled(
+                    format!("  {}", truncated),
+                    Style::default().fg(Color::Gray),
+                )));
+            }
+        }
+
+        // Beliefs
+        if !snap.beliefs.is_empty() {
+            lines.push(Line::raw(""));
+            lines.push(Line::from(Span::styled("BELIEFS", Style::default().fg(Color::DarkGray).add_modifier(Modifier::BOLD))));
+            for (about, belief) in snap.beliefs.iter().take(3) {
+                let text = format!("  About {}: {}", about, belief);
+                let truncated = if text.len() > (panel_width as usize).saturating_sub(2) {
+                    format!("{}…", &text[..(panel_width as usize).saturating_sub(3)])
+                } else {
+                    text
+                };
+                lines.push(Line::from(Span::styled(
+                    truncated,
+                    Style::default().fg(Color::LightMagenta),
+                )));
+            }
+        }
+
+        let para = Paragraph::new(lines).block(block);
+        f.render_widget(ratatui::widgets::Clear, panel_area);
+        f.render_widget(para, panel_area);
     }
 
     // -----------------------------------------------------------------------

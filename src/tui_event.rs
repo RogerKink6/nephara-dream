@@ -103,9 +103,14 @@ pub struct MapCell {
 pub struct AgentNeedsSnapshot {
     pub agent_id:   usize,
     pub agent_name: String,
+    pub agent_pos:  (u8, u8),
     pub hunger:     f32,
     pub energy:     f32,
     pub fun:        f32,
     pub social:     f32,
     pub hygiene:    f32,
+    /// Last N memory entries for the inspect panel.
+    pub memories:   Vec<String>,
+    /// Top beliefs about others: (about_name, most_recent_rumor).
+    pub beliefs:    Vec<(String, String)>,
 }

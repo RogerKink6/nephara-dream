@@ -51,6 +51,10 @@ pub enum Action {
     ReadOracle,
     /// Gossip about another agent (FEAT-22).
     Gossip { about: String, rumor: String },
+    /// Meditate — rest-like, restores energy + fun, auto-success.
+    Meditate,
+    /// Teach another nearby agent, sharing knowledge (both get social/fun boost).
+    Teach { about: String, lesson: String },
     /// Fallback when requested action fails validation.
     Wander,
 }
@@ -76,6 +80,8 @@ impl Action {
             Action::Compose { .. }    => "Compose",
             Action::ReadOracle        => "Read Oracle",
             Action::Gossip { .. }     => "Gossip",
+            Action::Meditate          => "Meditate",
+            Action::Teach { .. }      => "Teach",
             Action::Wander            => "Wander",
         }
     }
@@ -90,6 +96,7 @@ impl Action {
             Action::Compose { haiku }          => format!("Compose: \"{}\"", haiku),
             Action::ReadOracle                 => "Read Oracle".to_string(),
             Action::Gossip { about, .. }       => format!("Gossip about {}", about),
+            Action::Teach { about, .. }        => format!("Teach {}", about),
             other => other.name().to_string(),
         }
     }
@@ -299,6 +306,8 @@ pub fn action_cfg_and_attr<'a>(action: &Action, config: &'a Config) -> (&'a Acti
         Action::Compose { .. }   => (&config.actions.compose,     ""),
         Action::ReadOracle       => (&config.actions.read_oracle,  ""),
         Action::Gossip { .. }    => (&config.actions.gossip,       ""),
+        Action::Meditate         => (&config.actions.meditate,     ""),
+        Action::Teach { .. }     => (&config.actions.teach,        "heart"),
         Action::Wander           => (&config.actions.rest,        ""),
     }
 }
@@ -449,6 +458,17 @@ pub fn action_from_name(name: &str, target: Option<&str>, intent: Option<&str>) 
                 Action::Wander
             } else {
                 Action::Gossip { about, rumor }
+            }
+        }
+        "meditate" => Action::Meditate,
+        "teach" => {
+            let about  = target.unwrap_or("").to_string();
+            let lesson = intent.unwrap_or("I shared what I know").to_string();
+            if about.is_empty() {
+                tracing::warn!("Teach action with no target, defaulting to Wander");
+                Action::Wander
+            } else {
+                Action::Teach { about, lesson }
             }
         }
         other => {
