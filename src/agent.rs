@@ -193,6 +193,31 @@ impl NeedChanges {
 }
 
 // ---------------------------------------------------------------------------
+// Inventory (Feature D)
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum ItemKind {
+    Berry,
+    Fish,
+    Herb,
+    CookedMeal,
+}
+
+impl ItemKind {
+    pub fn label(self) -> &'static str {
+        match self {
+            ItemKind::Berry      => "Berry",
+            ItemKind::Fish       => "Fish",
+            ItemKind::Herb       => "Herb",
+            ItemKind::CookedMeal => "Cooked Meal",
+        }
+    }
+}
+
+pub type Inventory = HashMap<ItemKind, u8>;
+
+// ---------------------------------------------------------------------------
 // Agent
 // ---------------------------------------------------------------------------
 
@@ -236,6 +261,8 @@ pub struct Agent {
     pub praise_ticks_remaining: u32,
     /// Last N praise texts for repetition detection.
     pub recent_praises:         VecDeque<String>,
+    /// Item inventory: item kind → count.
+    pub inventory:              Inventory,
 }
 
 impl Agent {
@@ -278,11 +305,55 @@ impl Agent {
             current_action_display: String::new(),
             praise_ticks_remaining: 0,
             recent_praises:         VecDeque::new(),
+            inventory:              HashMap::new(),
         }
     }
 
     pub fn name(&self) -> &str { &self.identity.name }
     pub fn is_busy(&self) -> bool { self.busy_ticks > 0 }
+
+    /// Total number of items held.
+    pub fn inventory_count(&self) -> u8 {
+        self.inventory.values().copied().fold(0u8, |acc, v| acc.saturating_add(v))
+    }
+
+    /// Add `count` items of `kind`, clamped to `max_slots` total.
+    pub fn add_item(&mut self, kind: ItemKind, count: u8, max_slots: u8) {
+        let current_total = self.inventory_count();
+        let space = max_slots.saturating_sub(current_total);
+        let to_add = count.min(space);
+        if to_add > 0 {
+            *self.inventory.entry(kind).or_insert(0) += to_add;
+        }
+    }
+
+    /// Consume `count` items of `kind`. Returns true if successful.
+    pub fn consume_item(&mut self, kind: ItemKind, count: u8) -> bool {
+        let held = self.inventory.get(&kind).copied().unwrap_or(0);
+        if held >= count {
+            let new_val = held - count;
+            if new_val == 0 {
+                self.inventory.remove(&kind);
+            } else {
+                *self.inventory.get_mut(&kind).unwrap() = new_val;
+            }
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Compact display string for inventory (e.g. "Berry×2 Fish×1").
+    pub fn inventory_display(&self) -> String {
+        if self.inventory.is_empty() {
+            return String::new();
+        }
+        let mut parts: Vec<String> = self.inventory.iter()
+            .map(|(k, &v)| format!("{}×{}", k.label(), v))
+            .collect();
+        parts.sort();
+        parts.join(" ")
+    }
 
     /// Returns memory entries that belong to the given day.
     pub fn today_memories(&self, day: u32) -> Vec<&str> {

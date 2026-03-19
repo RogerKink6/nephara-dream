@@ -12,8 +12,9 @@ mod tui;
 mod tui_event;
 mod world;
 
+use std::collections::VecDeque;
 use std::sync::atomic::{AtomicBool, AtomicU64};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use clap::Parser;
 use rand::rngs::StdRng;
@@ -274,7 +275,8 @@ async fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     if cli.no_tui {
         run_streaming(world, total_ticks, seed, &cli.llm, &cli.souls, &cfg).await
     } else {
-        run_tui(world, total_ticks, seed, &cli.llm, &cli.souls, &cfg).await
+        let god_queue = Arc::new(Mutex::new(VecDeque::new()));
+        run_tui(world, total_ticks, seed, &cli.llm, &cli.souls, &cfg, god_queue).await
     }
 }
 
@@ -289,6 +291,7 @@ async fn run_tui(
     backend_name: &str,
     souls_dir:    &str,
     cfg:          &config::Config,
+    god_queue:    Arc<Mutex<VecDeque<tui_event::GodMessage>>>,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     // Suppress stdout from run_log in TUI mode
     world.run_log.tui_mode = true;
@@ -318,15 +321,18 @@ async fn run_tui(
     // Wire up TUI streaming (FEAT-13)
     world.tui_tx = Some(tx.clone());
 
+    let god_queue_sim = Arc::clone(&god_queue);
+    let god_queue_tui = god_queue;
+
     // Spawn simulation
     let sim_handle = tokio::spawn(sim_runner::run_simulation(
         tx, world, total_ticks, seed, backend_owned.clone(), souls_owned,
-        Arc::clone(&paused), Arc::clone(&tick_delay),
+        Arc::clone(&paused), Arc::clone(&tick_delay), god_queue_sim,
     ));
 
     // Run TUI in a blocking thread (crossterm needs blocking I/O)
     let tui_handle = tokio::task::spawn_blocking(move || {
-        let mut app = tui::TuiApp::new(agent_count, total_ticks, ticks_per_day, night_start_tick, seed, backend_owned, model_owned, roster, god_name_owned, paused, tick_delay);
+        let mut app = tui::TuiApp::new(agent_count, total_ticks, ticks_per_day, night_start_tick, seed, backend_owned, model_owned, roster, god_name_owned, paused, tick_delay, god_queue_tui);
         app.run(rx)
     });
 
@@ -422,7 +428,7 @@ async fn run_streaming(
             log::save_state(
                 souls_dir, agent.name(), &run_id,
                 &agent.life_story, &agent.attributes, &agent.attribute_xp,
-                &agent.affinity, &agent.beliefs,
+                &agent.affinity, &agent.beliefs, &agent.inventory,
             );
         }
     }

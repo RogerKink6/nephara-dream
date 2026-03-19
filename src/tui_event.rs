@@ -3,6 +3,22 @@
 use ratatui::style::Color;
 
 // ---------------------------------------------------------------------------
+// God communication
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone)]
+pub enum GodTarget {
+    All,
+    Agent(usize),
+}
+
+#[derive(Debug, Clone)]
+pub struct GodMessage {
+    pub target: GodTarget,
+    pub text:   String,
+}
+
+// ---------------------------------------------------------------------------
 // Day-boundary events (defined here; imported by world.rs and tui.rs)
 // ---------------------------------------------------------------------------
 
@@ -142,4 +158,8 @@ pub struct AgentNeedsSnapshot {
     pub attributes:        AgentAttributeSnapshot,
     /// Current daily intentions (morning planning text).
     pub daily_intentions:  Option<String>,
+    /// Affinity toward other agents: (name, score).
+    pub affinity:          Vec<(String, f32)>,
+    /// Compact inventory display string.
+    pub inventory_display: String,
 }

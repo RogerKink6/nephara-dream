@@ -1,6 +1,7 @@
 use serde::Deserialize;
 use tracing::{debug, warn};
 
+use crate::action::extract_code_fence;
 use crate::agent::{Agent, NeedChanges};
 use crate::config::Config;
 
@@ -149,14 +150,6 @@ pub fn parse_interpreter_response(raw: &str) -> Option<InterpretedIntent> {
 
     warn!("Failed to parse interpreter response. Raw: {}", &raw[..raw.len().min(300)]);
     None
-}
-
-fn extract_code_fence(s: &str) -> Option<String> {
-    let start = s.find("```")?;
-    let rest  = &s[start + 3..];
-    let rest  = rest.trim_start_matches(|c: char| c.is_alphabetic());
-    let end   = rest.find("```")?;
-    Some(rest[..end].trim().to_string())
 }
 
 // ---------------------------------------------------------------------------

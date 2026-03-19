@@ -197,3 +197,15 @@ dc             = 0
 [agent]
 beliefs_max_per_agent   = 5   # max rumors stored per agent-about-agent pair
 beliefs_in_prompt_count = 3   # how many beliefs to inject per agent into prompt
+
+[inventory]
+max_slots           = 10
+forage_berry_min    = 1
+forage_berry_max    = 3
+forage_herb_min     = 1
+forage_herb_max     = 2
+fish_min            = 1
+fish_max            = 3
+cook_items_required = 2
+cook_hunger_bonus   = 20.0
+cook_fun_bonus      = 5.0

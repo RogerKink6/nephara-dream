@@ -13,6 +13,21 @@ pub struct Config {
     pub world:      WorldConfig,
     pub events:     EventsConfig,
     pub agent:      AgentConfig,
+    pub inventory:  InventoryConfig,
+}
+
+#[derive(Debug, Deserialize, Clone)]
+pub struct InventoryConfig {
+    pub max_slots:           u8,
+    pub forage_berry_min:    u8,
+    pub forage_berry_max:    u8,
+    pub forage_herb_min:     u8,
+    pub forage_herb_max:     u8,
+    pub fish_min:            u8,
+    pub fish_max:            u8,
+    pub cook_items_required: u8,
+    pub cook_hunger_bonus:   f32,
+    pub cook_fun_bonus:      f32,
 }
 
 #[derive(Debug, Deserialize, Clone)]

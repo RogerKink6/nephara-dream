@@ -6,7 +6,7 @@ use chrono::Local;
 use colored::Colorize;
 use tracing::warn;
 
-use crate::agent::{Agent, AgentBeliefs};
+use crate::agent::{Agent, AgentBeliefs, Inventory, ItemKind};
 use crate::color;
 
 // ---------------------------------------------------------------------------
@@ -243,6 +243,9 @@ pub fn write_state_dump(
                 "hygiene": a.needs.hygiene,
             },
             "memory": a.memory.iter().take(5).collect::<Vec<_>>(),
+            "inventory": a.inventory.iter()
+                .map(|(k, v)| (format!("{:?}", k), v))
+                .collect::<std::collections::HashMap<_, _>>(),
         })).collect::<Vec<_>>(),
     });
 
@@ -372,6 +375,7 @@ pub struct AgentState {
     pub xp:            HashMap<String, u32>,
     pub relationships: HashMap<String, f32>,
     pub beliefs:       HashMap<String, AgentBeliefs>,
+    pub inventory:     Inventory,
 }
 
 impl Default for AgentState {
@@ -382,6 +386,7 @@ impl Default for AgentState {
             xp:            HashMap::new(),
             relationships: HashMap::new(),
             beliefs:       HashMap::new(),
+            inventory:     HashMap::new(),
         }
     }
 }
@@ -410,6 +415,7 @@ pub fn load_state(souls_dir: &str, name: &str) -> AgentState {
                 "## Attributes"    => "attributes",
                 "## Relationships" => "relationships",
                 "## Beliefs"       => "beliefs",
+                "## Inventory"     => "inventory",
                 _                  => "",
             };
             story_lines.clear();
@@ -459,6 +465,24 @@ pub fn load_state(souls_dir: &str, name: &str) -> AgentState {
                     }
                 }
             }
+            "inventory" => {
+                // Format: `Berry: 2`
+                let line = line.trim();
+                if let Some((k, v)) = line.split_once(':') {
+                    if let Ok(count) = v.trim().parse::<u8>() {
+                        let kind = match k.trim() {
+                            "Berry"       => Some(ItemKind::Berry),
+                            "Fish"        => Some(ItemKind::Fish),
+                            "Herb"        => Some(ItemKind::Herb),
+                            "CookedMeal"  => Some(ItemKind::CookedMeal),
+                            _             => None,
+                        };
+                        if let Some(kind) = kind {
+                            state.inventory.insert(kind, count);
+                        }
+                    }
+                }
+            }
             _ => {}
         }
     }
@@ -480,6 +504,7 @@ pub fn save_state(
     xp:            &HashMap<String, u32>,
     relationships: &HashMap<String, f32>,
     beliefs:       &HashMap<String, AgentBeliefs>,
+    inventory:     &Inventory,
 ) {
     let path = format!("{}/{}.state.md", souls_dir, name.to_lowercase());
     let date = Local::now().format("%Y-%m-%d");
@@ -512,6 +537,15 @@ pub fn save_state(
             if let Some(rumor) = ab.rumors.last() {
                 body.push_str(&format!("{}: \"{}\"\n", about, rumor));
             }
+        }
+    }
+
+    if !inventory.is_empty() {
+        body.push_str("\n## Inventory\n");
+        let mut items: Vec<_> = inventory.iter().collect();
+        items.sort_by_key(|(k, _)| format!("{:?}", k));
+        for (kind, count) in items {
+            body.push_str(&format!("{}: {}\n", format!("{:?}", kind), count));
         }
     }
 

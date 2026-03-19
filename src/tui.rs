@@ -1,7 +1,7 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::io;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use crossterm::event::{
@@ -22,7 +22,7 @@ use ratatui::Terminal;
 use tokio::sync::mpsc;
 
 use crate::color as ccolor;
-use crate::tui_event::{AgentNeedsSnapshot, LlmCallRecord, MapCell, TickEntrySnapshot, TuiEvent};
+use crate::tui_event::{AgentNeedsSnapshot, GodMessage, GodTarget, LlmCallRecord, MapCell, TickEntrySnapshot, TuiEvent};
 
 // ---------------------------------------------------------------------------
 // Log entry types
@@ -118,6 +118,11 @@ pub struct TuiApp {
     // A1: pause/resume + tick speed
     paused:               Arc<AtomicBool>,
     tick_delay_ms:        Arc<AtomicU64>,
+    // God communication overlay
+    god_queue:            Arc<Mutex<VecDeque<GodMessage>>>,
+    god_input_active:     bool,
+    god_input_text:       String,
+    god_input_target:     GodTarget,
 }
 
 impl TuiApp {
@@ -133,6 +138,7 @@ impl TuiApp {
         god_name:         String,
         paused:           Arc<AtomicBool>,
         tick_delay_ms:    Arc<AtomicU64>,
+        god_queue:        Arc<Mutex<VecDeque<GodMessage>>>,
     ) -> Self {
         TuiApp {
             map_cells:            vec![vec![], vec![]],
@@ -176,6 +182,10 @@ impl TuiApp {
             detail_scroll:        0,
             paused,
             tick_delay_ms,
+            god_queue,
+            god_input_active:  false,
+            god_input_text:    String::new(),
+            god_input_target:  GodTarget::All,
         }
     }
 
@@ -370,6 +380,45 @@ impl TuiApp {
     }
 
     fn handle_input(&mut self, key: crossterm::event::KeyEvent) {
+        // God input overlay intercepts all keys when active
+        if self.god_input_active {
+            match key.code {
+                KeyCode::Esc => {
+                    self.god_input_active = false;
+                    self.god_input_text.clear();
+                    self.god_input_target = GodTarget::All;
+                }
+                KeyCode::Enter => {
+                    let text = self.god_input_text.trim().to_string();
+                    if !text.is_empty() {
+                        let msg = GodMessage { target: self.god_input_target.clone(), text };
+                        let mut q = self.god_queue.lock().unwrap();
+                        q.push_back(msg);
+                    }
+                    self.god_input_active = false;
+                    self.god_input_text.clear();
+                    self.god_input_target = GodTarget::All;
+                }
+                KeyCode::Backspace => {
+                    self.god_input_text.pop();
+                }
+                KeyCode::Char('0') => {
+                    self.god_input_target = GodTarget::All;
+                }
+                KeyCode::Char(c @ '1'..='5') => {
+                    let idx = (c as usize) - ('1' as usize);
+                    if idx < self.agent_count {
+                        self.god_input_target = GodTarget::Agent(idx);
+                    }
+                }
+                KeyCode::Char(c) => {
+                    self.god_input_text.push(c);
+                }
+                _ => {}
+            }
+            return;
+        }
+
         // LLM overlay mode intercepts most keys
         if self.show_llm_overlay {
             match (key.modifiers, key.code) {
@@ -525,6 +574,11 @@ impl TuiApp {
             }
             (_, KeyCode::Char('l')) => { self.show_legend = !self.show_legend; }
             (_, KeyCode::Char('?')) => { self.show_help = !self.show_help; }
+            (_, KeyCode::Char('g')) => {
+                self.god_input_active = true;
+                self.god_input_text.clear();
+                self.god_input_target = GodTarget::All;
+            }
             (_, KeyCode::Char('p')) => {
                 let was = self.paused.load(Ordering::Relaxed);
                 self.paused.store(!was, Ordering::Relaxed);
@@ -670,6 +724,9 @@ impl TuiApp {
         }
         if self.show_legend {
             self.render_legend_overlay(f, main[0]);
+        }
+        if self.god_input_active {
+            self.render_god_overlay(f, area);
         }
     }
 
@@ -838,6 +895,42 @@ impl TuiApp {
                         Style::default().fg(Color::LightMagenta),
                     )));
                 }
+            }
+        }
+
+        // Inventory
+        if !snap.inventory_display.is_empty() {
+            lines.push(Line::raw(""));
+            lines.push(Line::from(Span::styled("INVENTORY", Style::default().fg(Color::DarkGray).add_modifier(Modifier::BOLD))));
+            lines.push(Line::from(Span::styled(
+                format!("  {}", snap.inventory_display),
+                Style::default().fg(Color::LightYellow),
+            )));
+        }
+
+        // Relationships
+        if !snap.affinity.is_empty() {
+            lines.push(Line::raw(""));
+            lines.push(Line::from(Span::styled("RELATIONSHIPS", Style::default().fg(Color::DarkGray).add_modifier(Modifier::BOLD))));
+            for (name, score) in &snap.affinity {
+                let clamped = score.clamp(-100.0, 100.0);
+                let bar_len = 10usize;
+                let (pos_filled, neg_filled, bar_color) = if clamped >= 0.0 {
+                    let f = ((clamped / 100.0) * bar_len as f32).round() as usize;
+                    (f.min(bar_len), 0usize, Color::LightGreen)
+                } else {
+                    let f = ((-clamped / 100.0) * bar_len as f32).round() as usize;
+                    (0usize, f.min(bar_len), Color::LightRed)
+                };
+                let bar = if pos_filled > 0 {
+                    format!("{}{}", "█".repeat(pos_filled), "░".repeat(bar_len - pos_filled))
+                } else {
+                    format!("{}{}", "░".repeat(bar_len - neg_filled), "█".repeat(neg_filled))
+                };
+                lines.push(Line::from(vec![
+                    Span::raw(format!("  {:<10}", name)),
+                    Span::styled(format!("{} {:+.0}", bar, clamped), Style::default().fg(bar_color)),
+                ]));
             }
         }
 
@@ -1046,6 +1139,65 @@ impl TuiApp {
             Line::from(vec![
                 Span::styled("  + / -", Style::default().fg(Color::LightYellow).add_modifier(Modifier::BOLD)),
                 Span::raw("     Increase / decrease tick speed"),
+            ]),
+            Line::from(vec![
+                Span::styled("  g", Style::default().fg(Color::LightYellow).add_modifier(Modifier::BOLD)),
+                Span::raw("           Speak as God (message agents)"),
+            ]),
+        ];
+
+        let para = Paragraph::new(lines).block(block);
+        f.render_widget(ratatui::widgets::Clear, popup_area);
+        f.render_widget(para, popup_area);
+    }
+
+    fn render_god_overlay(&self, f: &mut ratatui::Frame, area: ratatui::layout::Rect) {
+        let popup_width  = 50u16;
+        let popup_height = 9u16;
+        let x = area.x + area.width.saturating_sub(popup_width) / 2;
+        let y = area.y + area.height.saturating_sub(popup_height) / 2;
+        let popup_area = Rect {
+            x, y,
+            width:  popup_width.min(area.width),
+            height: popup_height.min(area.height),
+        };
+
+        let target_str = match &self.god_input_target {
+            GodTarget::All => "ALL".to_string(),
+            GodTarget::Agent(idx) => self.roster.get(*idx)
+                .map(|(n, _)| n.clone())
+                .unwrap_or_else(|| format!("Agent {}", idx)),
+        };
+
+        let agent_keys: String = self.roster.iter().enumerate()
+            .map(|(i, (name, _))| format!("{}={}", i + 1, name))
+            .collect::<Vec<_>>()
+            .join(" ");
+
+        let input_display = format!("> {}_", self.god_input_text);
+
+        let block = Block::default()
+            .title(" ✦  SPEAK AS GOD  ✦ ")
+            .borders(Borders::ALL)
+            .border_style(Style::default().fg(Color::LightMagenta).add_modifier(Modifier::BOLD));
+
+        let lines = vec![
+            Line::from(""),
+            Line::from(vec![
+                Span::raw("  Target: "),
+                Span::styled(&target_str, Style::default().fg(Color::LightYellow).add_modifier(Modifier::BOLD)),
+                Span::styled(format!("  [0=All {}]", agent_keys), Style::default().fg(Color::DarkGray)),
+            ]),
+            Line::from(""),
+            Line::from(vec![
+                Span::styled(format!("  {}", input_display), Style::default().fg(Color::White)),
+            ]),
+            Line::from(""),
+            Line::from(vec![
+                Span::styled("  [Enter]", Style::default().fg(Color::LightGreen)),
+                Span::raw(" Send    "),
+                Span::styled("[Esc]", Style::default().fg(Color::LightRed)),
+                Span::raw(" Cancel"),
             ]),
         ];
 

@@ -266,6 +266,8 @@ pub struct World {
     pub pending_llm_calls:   Vec<LlmCallRecord>,
     /// Currently active world event, if any (FEAT-19).
     pub active_event:        Option<ActiveWorldEvent>,
+    /// Pending god messages to inject into prompts this tick.
+    pub pending_god_messages: Vec<crate::tui_event::GodMessage>,
     /// When true (--no-tui mode), stream LLM action tokens to stdout.
     pub token_echo:          bool,
     /// When Some (TUI mode), send PartialToken events to the TUI.
@@ -324,6 +326,7 @@ impl World {
             pending_day_events: Vec::new(),
             pending_llm_calls:  Vec::new(),
             active_event: None,
+            pending_god_messages: Vec::new(),
             token_echo: false,
             tui_tx: None,
             grid,
@@ -332,6 +335,11 @@ impl World {
             llm_smart,
             llm_call_counter: 0,
         })
+    }
+
+    /// Enqueue god messages to be injected into this tick's prompts.
+    pub fn inject_god_messages(&mut self, msgs: Vec<crate::tui_event::GodMessage>) {
+        self.pending_god_messages.extend(msgs);
     }
 
     /// Load life stories and oracle responses for each agent (called after construction).
@@ -353,6 +361,7 @@ impl World {
             agent.attribute_xp = state.xp;
             agent.affinity     = state.relationships;
             agent.beliefs      = state.beliefs;
+            agent.inventory    = state.inventory;
 
             let oracle = runlog::load_oracle_response(&self.souls_dir, &agent.identity.name);
             if !oracle.trim().is_empty() {
@@ -626,6 +635,9 @@ impl World {
         for node in &mut self.resource_nodes {
             node.tick_respawn();
         }
+
+        // Clear god messages after all agents have been prompted this tick
+        self.pending_god_messages.clear();
 
         self.tick_num += 1;
 
@@ -1159,6 +1171,46 @@ impl World {
                 // Well + Bathe override: more effective hygiene restoration
                 if matches!(&action, Action::Bathe) && self.tile_at(pos) == TileType::Well {
                     need_changes.hygiene = Some(80.0 * res.tier.multiplier());
+                }
+
+                // Inventory grants (Feature D)
+                if matches!(res.tier, OutcomeTier::Success | OutcomeTier::CriticalSuccess) {
+                    use crate::agent::ItemKind;
+                    let inv_cfg = &self.config.inventory;
+                    let max_slots = inv_cfg.max_slots;
+                    match &action {
+                        Action::Forage => {
+                            let berry_count = self.rng.gen_range(inv_cfg.forage_berry_min..=inv_cfg.forage_berry_max);
+                            let herb_count  = self.rng.gen_range(inv_cfg.forage_herb_min..=inv_cfg.forage_herb_max);
+                            self.agents[idx].add_item(ItemKind::Berry, berry_count, max_slots);
+                            self.agents[idx].add_item(ItemKind::Herb,  herb_count,  max_slots);
+                        }
+                        Action::Fish => {
+                            let fish_count = self.rng.gen_range(inv_cfg.fish_min..=inv_cfg.fish_max);
+                            self.agents[idx].add_item(ItemKind::Fish, fish_count, max_slots);
+                        }
+                        Action::Cook => {
+                            let required = inv_cfg.cook_items_required;
+                            let has_food = self.agents[idx].inventory.get(&ItemKind::Berry).copied().unwrap_or(0)
+                                + self.agents[idx].inventory.get(&ItemKind::Fish).copied().unwrap_or(0);
+                            if has_food >= required {
+                                // Consume items (prefer berries first, then fish)
+                                let mut to_consume = required;
+                                let berries = self.agents[idx].inventory.get(&ItemKind::Berry).copied().unwrap_or(0);
+                                let from_berries = to_consume.min(berries);
+                                if from_berries > 0 { self.agents[idx].consume_item(ItemKind::Berry, from_berries); to_consume -= from_berries; }
+                                if to_consume > 0   { self.agents[idx].consume_item(ItemKind::Fish, to_consume); }
+                                // Apply cook bonus
+                                need_changes.hunger = Some(need_changes.hunger.unwrap_or(0.0) + inv_cfg.cook_hunger_bonus);
+                                need_changes.fun    = Some(need_changes.fun.unwrap_or(0.0) + inv_cfg.cook_fun_bonus);
+                                // CritSuccess also yields a CookedMeal item
+                                if res.tier == OutcomeTier::CriticalSuccess {
+                                    self.agents[idx].add_item(ItemKind::CookedMeal, 1, max_slots);
+                                }
+                            }
+                        }
+                        _ => {}
+                    }
                 }
 
                 self.agents[idx].needs.apply(&need_changes);
@@ -2142,6 +2194,10 @@ impl World {
         } else {
             String::new()
         };
+        let specialty_block = match agent.identity.specialty.as_deref() {
+            Some(s) if !s.is_empty() => format!("\nSpecialty: {}\n", s),
+            _ => String::new(),
+        };
 
         let story_block = if agent.life_story.is_empty() {
             "(your story is still unfolding — this is your first day)".to_string()
@@ -2179,10 +2235,25 @@ impl World {
                 }
             })
             .collect();
-        let affinity_block = if affinity_notes.is_empty() {
+        // C2: distant-agent affinity notes (strong bonds only)
+        let distant_affinity_notes: Vec<String> = self.agents.iter()
+            .filter(|a| a.id != idx && Self::chebyshev_dist(a.pos, pos) > 1)
+            .filter_map(|a| {
+                let v = agent.affinity.get(a.name()).copied().unwrap_or(0.0);
+                if v > 40.0 {
+                    Some(format!("  You feel a bond with {}, wherever they are.", a.name()))
+                } else if v < -40.0 {
+                    Some(format!("  You feel uneasy about {}, wherever they are.", a.name()))
+                } else {
+                    None
+                }
+            })
+            .collect();
+        let affinity_block = if affinity_notes.is_empty() && distant_affinity_notes.is_empty() {
             String::new()
         } else {
-            format!("\nBONDS:\n{}\n", affinity_notes.join("\n"))
+            let combined: Vec<String> = affinity_notes.iter().chain(distant_affinity_notes.iter()).cloned().collect();
+            format!("\nBONDS:\n{}\n", combined.join("\n"))
         };
 
         // FEAT-19: world event note for prompt
@@ -2200,6 +2271,15 @@ impl World {
             "\nThis world was shaped by {}, its creator and watchful presence.\nYour devotion to {}: {:.0}/100.\n",
             god_name, god_name, agent.devotion
         );
+
+        let inventory_line = {
+            let disp = agent.inventory_display();
+            if disp.is_empty() {
+                String::new()
+            } else {
+                format!("\n- Inventory: {}", disp)
+            }
+        };
 
         let remembered_past = if !agent.journal_summary.is_empty() {
             format!("REMEMBERED PAST:\n{}\n\n", agent.journal_summary)
@@ -2270,11 +2350,35 @@ impl World {
             String::new()
         };
 
+        // God voice injection
+        let god_voice_block = {
+            use crate::tui_event::GodTarget;
+            let mut voices: Vec<String> = Vec::new();
+            for msg in &self.pending_god_messages {
+                match &msg.target {
+                    GodTarget::All => {
+                        voices.push(format!(
+                            "\nA divine whisper fills the air: \"{}\"\n",
+                            msg.text
+                        ));
+                    }
+                    GodTarget::Agent(target_id) if *target_id == idx => {
+                        voices.push(format!(
+                            "\nA divine voice speaks to you: \"{}\"\n",
+                            msg.text
+                        ));
+                    }
+                    _ => {}
+                }
+            }
+            voices.join("")
+        };
+
         format!(
             r#"You are {name}. {personality}
 
 {backstory}
-{self_decl_block}{magic_block}
+{self_decl_block}{magic_block}{specialty_block}
 {remembered_past}YOUR STORY SO FAR:
 {story}
 
@@ -2288,7 +2392,7 @@ CURRENT STATE:
 - Energy:   {energy:.0}/100  (100=rested, 0=exhausted)
 - Fun:      {fun:.0}/100  (100=content, 0=bored)
 - Social:   {social:.0}/100  (100=connected, 0=lonely)
-- Hygiene:  {hygiene:.0}/100  (100=clean, 0=filthy)
+- Hygiene:  {hygiene:.0}/100  (100=clean, 0=filthy){inventory_line}
 {warnings}{god_block}
 NEARBY: {nearby}{affinity_block}{beliefs_block}{event_note}
 VIEWPORT (you are [X]):
@@ -2306,8 +2410,7 @@ AVAILABLE ACTIONS:
 {actions}{needs_suggestions}
 Magic is real and available to you at any time via cast_intent.
 Speak your desire and it will manifest — though words carry all their meanings.
-{magic_nudge}{oracle_nudge}
-
+{magic_nudge}{oracle_nudge}{god_voice_block}
 Choose ONE action. Respond with ONLY a JSON object:
 {{"action": "action_name", "target": "agent name (required for gossip/chat/teach/admire)", "intent": "if casting, your spoken desire or gossip rumor content", "reason": "brief reason", "description": "in your own words — what are you doing and why does it matter to you"}}"#,
             name             = agent.identity.name,
@@ -2315,6 +2418,7 @@ Choose ONE action. Respond with ONLY a JSON object:
             backstory        = agent.identity.backstory,
             self_decl_block  = self_decl_block,
             magic_block      = magic_block,
+            specialty_block  = specialty_block,
             remembered_past  = remembered_past,
             story            = story_block,
             intentions       = intentions_block,
@@ -2329,6 +2433,7 @@ Choose ONE action. Respond with ONLY a JSON object:
             fun              = agent.needs.fun,
             social           = agent.needs.social,
             hygiene          = agent.needs.hygiene,
+            inventory_line   = inventory_line,
             warnings         = warnings_str,
             god_block        = god_block,
             nearby           = nearby_str,
@@ -2343,6 +2448,7 @@ Choose ONE action. Respond with ONLY a JSON object:
             needs_suggestions   = needs_suggestions,
             magic_nudge         = magic_nudge,
             oracle_nudge        = oracle_nudge,
+            god_voice_block     = god_voice_block,
             recent_actions_str  = recent_actions_str,
             magic_repeat_nudge  = magic_repeat_nudge,
             praise_nudge        = praise_nudge,
@@ -3160,6 +3266,10 @@ Respond ONLY with JSON — no other text:
                 })
                 .take(3)
                 .collect();
+            let mut affinity: Vec<(String, f32)> = a.affinity.iter()
+                .map(|(name, &score)| (name.clone(), score))
+                .collect();
+            affinity.sort_by(|x, y| y.1.partial_cmp(&x.1).unwrap_or(std::cmp::Ordering::Equal));
             AgentNeedsSnapshot {
                 agent_id:         a.id,
                 agent_name:       a.name().to_string(),
@@ -3180,7 +3290,9 @@ Respond ONLY with JSON — no other text:
                     heart: a.attributes.heart,
                     numen: a.attributes.numen,
                 },
-                daily_intentions: a.daily_intentions.clone(),
+                daily_intentions:  a.daily_intentions.clone(),
+                affinity,
+                inventory_display: a.inventory_display(),
             }
         }).collect()
     }

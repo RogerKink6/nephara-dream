@@ -1,12 +1,13 @@
+use std::collections::VecDeque;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Instant;
 use tokio::sync::mpsc;
 use tokio::time::Duration;
 use tracing::warn;
 
 use crate::log as runlog;
-use crate::tui_event::{DayEventKind, TickEntrySnapshot, TuiEvent};
+use crate::tui_event::{DayEventKind, GodMessage, TickEntrySnapshot, TuiEvent};
 use crate::world::World;
 
 // ---------------------------------------------------------------------------
@@ -39,6 +40,7 @@ pub async fn run_simulation(
     souls_dir:      String,
     paused:         Arc<AtomicBool>,
     tick_delay_ms:  Arc<AtomicU64>,
+    god_queue:      Arc<Mutex<VecDeque<GodMessage>>>,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     // Banner to file
     world.run_log.write_line(&format!(
@@ -73,6 +75,15 @@ pub async fn run_simulation(
 
         // Send tick start (fire-and-forget; TUI may be slow)
         let _ = tx.send(TuiEvent::TickStart { tick: tick_num, day, time_of_day: tod }).await;
+
+        // Drain god messages and inject into world
+        {
+            let mut queue = god_queue.lock().unwrap();
+            if !queue.is_empty() {
+                let msgs: Vec<GodMessage> = queue.drain(..).collect();
+                world.inject_god_messages(msgs);
+            }
+        }
 
         let result = world.tick().await?;
 
@@ -201,7 +212,7 @@ pub async fn run_simulation(
             runlog::save_state(
                 &souls_dir, agent.name(), &run_id,
                 &agent.life_story, &agent.attributes, &agent.attribute_xp,
-                &agent.affinity, &agent.beliefs,
+                &agent.affinity, &agent.beliefs, &agent.inventory,
             );
         }
     }

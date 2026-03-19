@@ -398,7 +398,7 @@ fn try_parse_json(s: &str) -> Option<(Action, Option<String>, Option<String>)> {
     Some((action, reason, description))
 }
 
-fn extract_code_fence(s: &str) -> Option<String> {
+pub fn extract_code_fence(s: &str) -> Option<String> {
     let start = s.find("```")?;
     let rest  = &s[start + 3..];
     // skip optional language tag
