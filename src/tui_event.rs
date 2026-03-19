@@ -114,18 +114,32 @@ pub struct MapCell {
     pub bold:  bool,
 }
 
+pub struct AgentAttributeSnapshot {
+    pub vigor: u32,
+    pub wit:   u32,
+    pub grace: u32,
+    pub heart: u32,
+    pub numen: u32,
+}
+
 pub struct AgentNeedsSnapshot {
-    pub agent_id:   usize,
-    pub agent_name: String,
-    pub agent_pos:  (u8, u8),
-    pub hunger:     f32,
-    pub energy:     f32,
-    pub fun:        f32,
-    pub social:     f32,
-    pub hygiene:    f32,
-    pub devotion:   f32,
+    pub agent_id:          usize,
+    pub agent_name:        String,
+    pub agent_pos:         (u8, u8),
+    pub hunger:            f32,
+    pub energy:            f32,
+    pub fun:               f32,
+    pub social:            f32,
+    pub hygiene:           f32,
+    pub devotion:          f32,
     /// Last N memory entries for the inspect panel.
-    pub memories:   Vec<String>,
+    pub memories:          Vec<String>,
     /// Top beliefs about others: (about_name, most_recent_rumor).
-    pub beliefs:    Vec<(String, String)>,
+    pub beliefs:           Vec<(String, String)>,
+    /// Life story prose narrative.
+    pub life_story:        String,
+    /// Attribute scores.
+    pub attributes:        AgentAttributeSnapshot,
+    /// Current daily intentions (morning planning text).
+    pub daily_intentions:  Option<String>,
 }

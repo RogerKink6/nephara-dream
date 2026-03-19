@@ -1,4 +1,3 @@
-use chrono::Local as ChronoLocal;
 use colored::Colorize;
 use rand::rngs::StdRng;
 use rand::seq::SliceRandom;
@@ -338,19 +337,10 @@ impl World {
     /// Load life stories and oracle responses for each agent (called after construction).
     pub async fn load_stories(&mut self) {
         for agent in &mut self.agents {
-            agent.life_story = runlog::load_story(&self.souls_dir, &agent.identity.name);
-            let oracle = runlog::load_oracle_response(&self.souls_dir, &agent.identity.name);
-            if !oracle.trim().is_empty() {
-                agent.oracle_pending = true;
-                tracing::info!(agent = %agent.identity.name, "Oracle response pending");
-            }
-            // FEAT-20: load raw journal excerpt; will be summarized by summarize_journal_memories()
-            agent.journal_summary = runlog::load_journal_excerpt(
-                &self.souls_dir, &agent.identity.name, self.config.memory.journal_n_runs,
-            );
-            // FEAT-21: load grown attribute scores and XP
-            let growth = runlog::load_growth(&self.souls_dir, &agent.identity.name);
-            for (attr, score) in &growth.scores {
+            // Load consolidated state (story, attributes, relationships, beliefs)
+            let state = runlog::load_state(&self.souls_dir, &agent.identity.name);
+            agent.life_story = state.story;
+            for (attr, score) in &state.scores {
                 match attr.as_str() {
                     "vigor" => { if *score <= 10 { agent.attributes.vigor = *score; } }
                     "wit"   => { if *score <= 10 { agent.attributes.wit   = *score; } }
@@ -360,11 +350,19 @@ impl World {
                     _ => {}
                 }
             }
-            agent.attribute_xp = growth.xp;
-            // FEAT-18: load affinity / relationships
-            agent.affinity = runlog::load_relationships(&self.souls_dir, &agent.identity.name);
-            // FEAT-23: load beliefs
-            agent.beliefs  = runlog::load_beliefs(&self.souls_dir, &agent.identity.name);
+            agent.attribute_xp = state.xp;
+            agent.affinity     = state.relationships;
+            agent.beliefs      = state.beliefs;
+
+            let oracle = runlog::load_oracle_response(&self.souls_dir, &agent.identity.name);
+            if !oracle.trim().is_empty() {
+                agent.oracle_pending = true;
+                tracing::info!(agent = %agent.identity.name, "Oracle response pending");
+            }
+            // FEAT-20: load raw journal excerpt; will be summarized by summarize_journal_memories()
+            agent.journal_summary = runlog::load_journal_excerpt(
+                &self.souls_dir, &agent.identity.name, self.config.memory.journal_n_runs,
+            );
         }
     }
 
@@ -1528,7 +1526,7 @@ impl World {
 
         if !self.is_test_run {
             let run_id = self.run_log.run_id.clone();
-            runlog::append_prayer(&self.souls_dir, &self.agents[idx].identity.name, &run_id, day, tick, tod, prayer);
+            runlog::append_chronicle(&self.souls_dir, &self.agents[idx].identity.name, &run_id, day, tick, tod, "prayer", prayer);
         }
 
         // Evaluate prayer quality and apply variable rewards
@@ -1620,7 +1618,7 @@ impl World {
 
         if !self.is_test_run {
             let run_id = self.run_log.run_id.clone();
-            runlog::archive_oracle_response(&self.souls_dir, &name, &run_id, day, content.trim());
+            runlog::archive_oracle_response(&self.souls_dir, &name, &run_id, day, tick, tod, content.trim());
         }
 
         let reaction_short = &reaction[..reaction.len().min(80)];
@@ -1693,7 +1691,7 @@ impl World {
         if !self.is_test_run {
             let run_id = self.run_log.run_id.clone();
             let entry = format!("From {}: expressed heartfelt admiration.", admirer_name);
-            runlog::append_admiration(&self.souls_dir, admired_name, &run_id, day, tick, tod, &entry);
+            runlog::append_chronicle(&self.souls_dir, admired_name, &run_id, day, tick, tod, "admiration", &entry);
         }
 
         // Evaluate admiration quality
@@ -1737,7 +1735,7 @@ impl World {
 
         if !self.is_test_run {
             let run_id = self.run_log.run_id.clone();
-            runlog::append_praise(&self.souls_dir, &name, &run_id, day, tick, tod, praise_text);
+            runlog::append_chronicle(&self.souls_dir, &name, &run_id, day, tick, tod, "praise", praise_text);
         }
 
         // Evaluate praise quality via LLM (same tier system as prayer eval)
@@ -1895,7 +1893,8 @@ impl World {
 
         if !self.is_test_run {
             let run_id = self.run_log.run_id.clone();
-            runlog::append_haiku(&self.souls_dir, &name, &run_id, day, tick, tod, haiku, score, &verdict);
+            let haiku_content = format!("{}\n\nScore: {} | {}", haiku, score, verdict);
+            runlog::append_chronicle(&self.souls_dir, &name, &run_id, day, tick, tod, "haiku", &haiku_content);
         }
 
         let (outcome_prefix, need_changes) = if score >= 10 {
@@ -2364,11 +2363,12 @@ Choose ONE action. Respond with ONLY a JSON object:
             let name      = self.agents[idx].name().to_string();
             let souls_dir = self.souls_dir.clone();
             let run_id    = self.run_log.run_id.clone();
+            let tick      = self.tick_num;
+            let tod       = runlog::time_of_day(tick % self.config.time.ticks_per_day, self.config.time.night_start_tick);
             debug!(target: "reflection", agent = %name, day = day, "Story updated");
             self.agents[idx].life_story = trimmed.clone();
             if !self.is_test_run {
-                runlog::save_story(&souls_dir, &name, &trimmed);
-                runlog::append_day_journal(&souls_dir, &name, &run_id, day, &trimmed);
+                runlog::append_chronicle(&souls_dir, &name, &run_id, day, tick, tod, "journal", &trimmed);
             }
             runlog::log_introspection(&run_id, &name, day, "End-of-Day Reflection", &trimmed);
             self.pending_day_events.push(DayEvent {
@@ -2406,8 +2406,9 @@ Choose ONE action. Respond with ONLY a JSON object:
             let run_id    = self.run_log.run_id.clone();
             self.agents[idx].desires = Some(trimmed.clone());
             if !self.is_test_run {
-                let date = ChronoLocal::now().format("%Y-%m-%d").to_string();
-                runlog::append_wishes(&souls_dir, &name, &format!("## Run {} | Day {} — {}", run_id, day, date), &trimmed);
+                let tick = self.tick_num;
+                let tod  = runlog::time_of_day(tick % self.config.time.ticks_per_day, self.config.time.night_start_tick);
+                runlog::append_chronicle(&souls_dir, &name, &run_id, day, tick, tod, "wishes", &trimmed);
             }
             runlog::log_introspection(&run_id, &name, day, "End-of-Day Desires", &trimmed);
             self.pending_day_events.push(DayEvent {
@@ -2440,10 +2441,11 @@ Choose ONE action. Respond with ONLY a JSON object:
                 let name      = self.agents[idx].name().to_string();
                 let souls_dir = self.souls_dir.clone();
                 let run_id    = self.run_log.run_id.clone();
-                let day       = self.tick_num / self.config.time.ticks_per_day + 1;
+                let tick = self.tick_num;
+                let day  = tick / self.config.time.ticks_per_day + 1;
                 if !self.is_test_run {
-                    let date = ChronoLocal::now().format("%Y-%m-%d").to_string();
-                    runlog::append_wishes(&souls_dir, &name, &format!("## Run {} End — {}", run_id, date), &trimmed);
+                    let tod = runlog::time_of_day(tick % self.config.time.ticks_per_day, self.config.time.night_start_tick);
+                    runlog::append_chronicle(&souls_dir, &name, &run_id, day, tick, tod, "wishes", &trimmed);
                 }
                 runlog::log_introspection(&run_id, &name, day, "End-of-Run Desires", &trimmed);
             }
@@ -3069,6 +3071,7 @@ Respond ONLY with JSON — no other text:
     // -----------------------------------------------------------------------
 
     pub fn agent_needs_snapshots(&self) -> Vec<AgentNeedsSnapshot> {
+        use crate::tui_event::AgentAttributeSnapshot;
         self.agents.iter().map(|a| {
             let memories: Vec<String> = a.memory.iter().take(3).cloned().collect();
             let beliefs: Vec<(String, String)> = a.beliefs.iter()
@@ -3078,17 +3081,26 @@ Respond ONLY with JSON — no other text:
                 .take(3)
                 .collect();
             AgentNeedsSnapshot {
-                agent_id:   a.id,
-                agent_name: a.name().to_string(),
-                agent_pos:  a.pos,
-                hunger:     a.needs.hunger,
-                energy:     a.needs.energy,
-                fun:        a.needs.fun,
-                social:     a.needs.social,
-                hygiene:    a.needs.hygiene,
-                devotion:   a.devotion,
+                agent_id:         a.id,
+                agent_name:       a.name().to_string(),
+                agent_pos:        a.pos,
+                hunger:           a.needs.hunger,
+                energy:           a.needs.energy,
+                fun:              a.needs.fun,
+                social:           a.needs.social,
+                hygiene:          a.needs.hygiene,
+                devotion:         a.devotion,
                 memories,
                 beliefs,
+                life_story:       a.life_story.clone(),
+                attributes:       AgentAttributeSnapshot {
+                    vigor: a.attributes.vigor,
+                    wit:   a.attributes.wit,
+                    grace: a.attributes.grace,
+                    heart: a.attributes.heart,
+                    numen: a.attributes.numen,
+                },
+                daily_intentions: a.daily_intentions.clone(),
             }
         }).collect()
     }

@@ -109,6 +109,10 @@ pub struct TuiApp {
     llm_overlay_entry:    usize,
     llm_overlay_scroll:   usize,
     llm_overlay_expanded: HashSet<usize>,
+    // Tab 2 — Agent Detail
+    active_tab:           u8,
+    detail_selected:      usize,
+    detail_scroll:        usize,
 }
 
 impl TuiApp {
@@ -160,6 +164,9 @@ impl TuiApp {
             llm_overlay_entry:    0,
             llm_overlay_scroll:   0,
             llm_overlay_expanded: HashSet::new(),
+            active_tab:           0,
+            detail_selected:      0,
+            detail_scroll:        0,
         }
     }
 
@@ -403,6 +410,48 @@ impl TuiApp {
             return;
         }
 
+        // Tab key always toggles between Tab 1 (World) and Tab 2 (Agent Detail)
+        if key.code == KeyCode::Tab && key.modifiers == KeyModifiers::NONE {
+            self.active_tab = if self.active_tab == 0 { 1 } else { 0 };
+            return;
+        }
+
+        // Tab 2 — Agent Detail: j/k/1-5 navigate agents; q/Esc quit
+        if self.active_tab == 1 {
+            match (key.modifiers, key.code) {
+                (_, KeyCode::Char('q')) | (_, KeyCode::Esc) => { self.should_quit = true; }
+                (_, KeyCode::Char('?')) => { self.show_help = !self.show_help; }
+                (_, KeyCode::Char('j')) | (_, KeyCode::Down) => {
+                    if self.agent_count > 0 {
+                        self.detail_selected = (self.detail_selected + 1) % self.agent_count;
+                        self.detail_scroll = 0;
+                    }
+                }
+                (_, KeyCode::Char('k')) | (_, KeyCode::Up) => {
+                    if self.agent_count > 0 {
+                        self.detail_selected = (self.detail_selected + self.agent_count - 1) % self.agent_count;
+                        self.detail_scroll = 0;
+                    }
+                }
+                (_, KeyCode::PageDown) => {
+                    self.detail_scroll = self.detail_scroll.saturating_add(5);
+                }
+                (_, KeyCode::PageUp) => {
+                    self.detail_scroll = self.detail_scroll.saturating_sub(5);
+                }
+                (_, KeyCode::Char(c @ '1'..='5')) => {
+                    let idx = (c as usize) - ('1' as usize);
+                    if idx < self.agent_count {
+                        self.detail_selected = idx;
+                        self.detail_scroll = 0;
+                    }
+                }
+                _ => {}
+            }
+            return;
+        }
+
+        // Tab 1 — World view
         match (key.modifiers, key.code) {
             (_, KeyCode::Char('q')) | (_, KeyCode::Esc) => { self.should_quit = true; }
             (KeyModifiers::NONE, KeyCode::Char('d')) => {
@@ -533,7 +582,7 @@ impl TuiApp {
 
         // Title bar
         let status = if self.is_complete { "DONE" } else { "RUNNING" };
-        let lock_indicator = if self.scroll_locked { "  [SCROLL LOCK — G to resume]" } else { "" };
+        let lock_indicator = if self.scroll_locked && self.active_tab == 0 { "  [SCROLL LOCK — G to resume]" } else { "" };
         let tick_in_day = self.tick % self.ticks_per_day;
         let day_icon = if tick_in_day >= self.night_start_tick { "☾" } else { "☀" };
         let day_filled = ((tick_in_day as f32 / self.ticks_per_day as f32) * 8.0).round() as usize;
@@ -542,17 +591,28 @@ impl TuiApp {
             tick_in_day, self.ticks_per_day);
         let tick_filled = ((self.tick as f32 / self.total_ticks as f32) * 10.0).round() as usize;
         let tick_bar = format!("[{}{}]", "█".repeat(tick_filled.min(10)), "░".repeat(10 - tick_filled.min(10)));
+        let tab_indicator = if self.active_tab == 0 { "[Tab→Agents]" } else { "[Tab→World]" };
         let title_text = format!(
-            " NEPHARA  model:{}  seed:{}  tick:{}/{} {}  Day {} {}  [{}]  {}{}  ✦ {}",
+            " NEPHARA  model:{}  seed:{}  tick:{}/{} {}  Day {} {}  [{}]  {}{}  ✦ {}  {}",
             self.model_name, self.seed, self.tick, self.total_ticks, tick_bar,
             self.day, day_bar, self.backend_name, status, lock_indicator,
-            self.god_name
+            self.god_name, tab_indicator
         );
         let title = Paragraph::new(title_text)
             .style(Style::default().fg(Color::White).add_modifier(Modifier::BOLD));
         f.render_widget(title, outer[0]);
 
-        // Main area: map | log
+        if self.active_tab == 1 {
+            // Tab 2 — Agent Detail view
+            self.render_tab2(f, outer[1]);
+            self.render_needs(f, outer[2]);
+            if self.show_help {
+                self.render_help_overlay(f, area);
+            }
+            return;
+        }
+
+        // Tab 1 — World view: map | log
         let main = Layout::default()
             .direction(Direction::Horizontal)
             .constraints([
@@ -579,6 +639,181 @@ impl TuiApp {
         if self.show_legend {
             self.render_legend_overlay(f, main[0]);
         }
+    }
+
+    // -----------------------------------------------------------------------
+    // Tab 2 — Agent Detail
+    // -----------------------------------------------------------------------
+
+    fn render_tab2(&self, f: &mut ratatui::Frame, area: ratatui::layout::Rect) {
+        let panels = Layout::default()
+            .direction(Direction::Horizontal)
+            .constraints([
+                Constraint::Length(22),
+                Constraint::Min(0),
+            ])
+            .split(area);
+
+        // Left: agent list
+        let list_block = Block::default()
+            .title(" AGENTS ")
+            .borders(Borders::ALL)
+            .border_style(Style::default().fg(Color::DarkGray));
+        let inner = list_block.inner(panels[0]);
+        f.render_widget(list_block, panels[0]);
+
+        let mut list_lines: Vec<Line> = Vec::new();
+        for (i, snap) in self.agent_needs.iter().enumerate() {
+            let agent_color = agent_color_for_id(snap.agent_id);
+            let prefix = if i == self.detail_selected { "▶ " } else { "  " };
+            let style = if i == self.detail_selected {
+                Style::default().fg(agent_color).add_modifier(Modifier::BOLD)
+            } else {
+                Style::default().fg(agent_color)
+            };
+            let key = (i + 1).to_string();
+            list_lines.push(Line::from(vec![
+                Span::styled(format!("{}{} [{}]", prefix, snap.agent_name, key), style),
+            ]));
+            // Position below name
+            list_lines.push(Line::from(Span::styled(
+                format!("   ({},{})", snap.agent_pos.0, snap.agent_pos.1),
+                Style::default().fg(Color::DarkGray),
+            )));
+        }
+        let para = Paragraph::new(list_lines);
+        f.render_widget(para, inner);
+
+        // Right: agent detail
+        if let Some(snap) = self.agent_needs.get(self.detail_selected) {
+            self.render_agent_detail_content(f, panels[1], snap, self.detail_scroll);
+        }
+    }
+
+    /// Shared helper: render agent detail content into `area` with scroll offset.
+    /// Used by Tab 2 (full panel) and the inspect panel overlay.
+    fn render_agent_detail_content(
+        &self,
+        f: &mut ratatui::Frame,
+        area: ratatui::layout::Rect,
+        snap: &AgentNeedsSnapshot,
+        scroll: usize,
+    ) {
+        let agent_color = agent_color_for_id(snap.agent_id);
+        let title = format!(" {} ({},{}) ", snap.agent_name, snap.agent_pos.0, snap.agent_pos.1);
+        let block = Block::default()
+            .title(title)
+            .borders(Borders::ALL)
+            .border_style(Style::default().fg(agent_color));
+        let inner = block.inner(area);
+        f.render_widget(block, area);
+
+        let width = inner.width as usize;
+        let mut lines: Vec<Line> = Vec::new();
+
+        // Daily intentions
+        if let Some(ref intentions) = snap.daily_intentions {
+            lines.push(Line::from(Span::styled("INTENTIONS", Style::default().fg(Color::DarkGray).add_modifier(Modifier::BOLD))));
+            for line in wrap_text(intentions, width.saturating_sub(2)) {
+                lines.push(Line::from(Span::styled(
+                    format!("  {}", line),
+                    Style::default().fg(Color::LightYellow),
+                )));
+            }
+            lines.push(Line::raw(""));
+        }
+
+        // Needs
+        lines.push(Line::from(Span::styled("NEEDS", Style::default().fg(Color::DarkGray).add_modifier(Modifier::BOLD))));
+        let needs_arr = [
+            ("Satiety", snap.hunger),
+            ("Energy",  snap.energy),
+            ("Fun",     snap.fun),
+            ("Social",  snap.social),
+            ("Hygiene", snap.hygiene),
+        ];
+        for (label, val) in &needs_arr {
+            lines.push(Line::from(vec![
+                Span::raw(format!("  {:<9}", label)),
+                need_span(*val),
+            ]));
+        }
+        // Devotion
+        let dev_filled = ((snap.devotion / 100.0 * 5.0).round() as usize).min(5);
+        let dev_bar = format!("{}{}", "█".repeat(dev_filled), "░".repeat(5 - dev_filled));
+        lines.push(Line::from(vec![
+            Span::raw(format!("  {:<9}", "Devotion")),
+            Span::styled(
+                format!("{} {:>3.0}", dev_bar, snap.devotion),
+                Style::default().fg(Color::Magenta),
+            ),
+        ]));
+
+        // Attributes
+        lines.push(Line::raw(""));
+        lines.push(Line::from(Span::styled("ATTRIBUTES", Style::default().fg(Color::DarkGray).add_modifier(Modifier::BOLD))));
+        let attrs = &snap.attributes;
+        let attr_pairs = [
+            ("Vigor", attrs.vigor),
+            ("Wit",   attrs.wit),
+            ("Grace", attrs.grace),
+            ("Heart", attrs.heart),
+            ("Numen", attrs.numen),
+        ];
+        for (label, val) in &attr_pairs {
+            let filled = (*val as usize).min(10);
+            let bar = format!("{}{}", "█".repeat(filled), "░".repeat(10 - filled));
+            lines.push(Line::from(vec![
+                Span::raw(format!("  {:<9}", label)),
+                Span::styled(format!("{} {}", bar, val), Style::default().fg(Color::Cyan)),
+            ]));
+        }
+
+        // Story
+        if !snap.life_story.is_empty() {
+            lines.push(Line::raw(""));
+            lines.push(Line::from(Span::styled("STORY", Style::default().fg(Color::DarkGray).add_modifier(Modifier::BOLD))));
+            for line in wrap_text(&snap.life_story, width.saturating_sub(2)) {
+                lines.push(Line::from(Span::styled(
+                    format!("  {}", line),
+                    Style::default().fg(Color::Gray),
+                )));
+            }
+        }
+
+        // Memories
+        if !snap.memories.is_empty() {
+            lines.push(Line::raw(""));
+            lines.push(Line::from(Span::styled("MEMORIES", Style::default().fg(Color::DarkGray).add_modifier(Modifier::BOLD))));
+            for mem in snap.memories.iter().take(3) {
+                for line in wrap_text(mem, width.saturating_sub(2)) {
+                    lines.push(Line::from(Span::styled(
+                        format!("  {}", line),
+                        Style::default().fg(Color::Gray),
+                    )));
+                }
+            }
+        }
+
+        // Beliefs
+        if !snap.beliefs.is_empty() {
+            lines.push(Line::raw(""));
+            lines.push(Line::from(Span::styled("BELIEFS", Style::default().fg(Color::DarkGray).add_modifier(Modifier::BOLD))));
+            for (about, belief) in snap.beliefs.iter().take(5) {
+                for line in wrap_text(&format!("About {}: {}", about, belief), width.saturating_sub(2)) {
+                    lines.push(Line::from(Span::styled(
+                        format!("  {}", line),
+                        Style::default().fg(Color::LightMagenta),
+                    )));
+                }
+            }
+        }
+
+        let total  = lines.len();
+        let height = inner.height as usize;
+        let scroll = scroll.min(total.saturating_sub(height));
+        let para = Paragraph::new(lines).scroll((scroll as u16, 0));
+        f.render_widget(para, inner);
     }
 
     fn render_map(&self, f: &mut ratatui::Frame, area: ratatui::layout::Rect) {
@@ -717,7 +952,7 @@ impl TuiApp {
 
     fn render_help_overlay(&self, f: &mut ratatui::Frame, area: ratatui::layout::Rect) {
         let popup_width  = 50u16;
-        let popup_height = 13u16;
+        let popup_height = 15u16;
         let x = area.x + area.width.saturating_sub(popup_width) / 2;
         let y = area.y + area.height.saturating_sub(popup_height) / 2;
         let popup_area = Rect {
@@ -737,8 +972,12 @@ impl TuiApp {
                 Span::raw("         Quit"),
             ]),
             Line::from(vec![
+                Span::styled("  Tab", Style::default().fg(Color::LightYellow).add_modifier(Modifier::BOLD)),
+                Span::raw("       Switch World ↔ Agent Detail"),
+            ]),
+            Line::from(vec![
                 Span::styled("  j / k", Style::default().fg(Color::LightYellow).add_modifier(Modifier::BOLD)),
-                Span::raw("     Scroll log down/up"),
+                Span::raw("     Scroll log / cycle agents"),
             ]),
             Line::from(vec![
                 Span::styled("  [ / ]", Style::default().fg(Color::LightYellow).add_modifier(Modifier::BOLD)),
@@ -758,7 +997,7 @@ impl TuiApp {
             ]),
             Line::from(vec![
                 Span::styled("  1 – 5", Style::default().fg(Color::LightYellow).add_modifier(Modifier::BOLD)),
-                Span::raw("     Inspect agent (toggle)"),
+                Span::raw("     Inspect/jump to agent"),
             ]),
             Line::from(vec![
                 Span::styled("  ?", Style::default().fg(Color::LightYellow).add_modifier(Modifier::BOLD)),
@@ -778,86 +1017,14 @@ impl TuiApp {
     fn render_inspect_panel(&self, f: &mut ratatui::Frame, area: ratatui::layout::Rect, agent_idx: usize) {
         let Some(snap) = self.agent_needs.get(agent_idx) else { return; };
 
-        let panel_width  = area.width.min(50);
-        let panel_height = area.height.min(20);
+        let panel_width  = area.width.min(52);
+        let panel_height = area.height.min(28);
         let x = area.x + area.width.saturating_sub(panel_width);
         let y = area.y;
         let panel_area = Rect { x, y, width: panel_width, height: panel_height };
 
-        let agent_color = agent_color_for_id(snap.agent_id);
-        let title = format!(" {} ({},{}) ", snap.agent_name, snap.agent_pos.0, snap.agent_pos.1);
-        let block = Block::default()
-            .title(title)
-            .borders(Borders::ALL)
-            .border_style(Style::default().fg(agent_color));
-
-        let mut lines: Vec<Line> = Vec::new();
-
-        // Needs
-        lines.push(Line::from(Span::styled("NEEDS", Style::default().fg(Color::DarkGray).add_modifier(Modifier::BOLD))));
-        let needs_arr = [
-            ("Satiety", snap.hunger),
-            ("Energy",  snap.energy),
-            ("Fun",     snap.fun),
-            ("Social",  snap.social),
-            ("Hygiene", snap.hygiene),
-        ];
-        for (label, val) in &needs_arr {
-            lines.push(Line::from(vec![
-                Span::raw(format!("  {:<9}", label)),
-                need_span(*val),
-            ]));
-        }
-
-        // Devotion
-        let dev_filled = ((snap.devotion / 100.0 * 5.0).round() as usize).min(5);
-        let dev_bar = format!("{}{}", "█".repeat(dev_filled), "░".repeat(5 - dev_filled));
-        lines.push(Line::from(vec![
-            Span::raw(format!("  {:<9}", "Devotion")),
-            Span::styled(
-                format!("{} {:>3.0}", dev_bar, snap.devotion),
-                Style::default().fg(Color::Magenta),
-            ),
-        ]));
-
-        // Memories
-        if !snap.memories.is_empty() {
-            lines.push(Line::raw(""));
-            lines.push(Line::from(Span::styled("MEMORIES", Style::default().fg(Color::DarkGray).add_modifier(Modifier::BOLD))));
-            for mem in snap.memories.iter().take(3) {
-                let truncated = if mem.len() > (panel_width as usize).saturating_sub(4) {
-                    format!("{}…", &mem[..(panel_width as usize).saturating_sub(5)])
-                } else {
-                    mem.clone()
-                };
-                lines.push(Line::from(Span::styled(
-                    format!("  {}", truncated),
-                    Style::default().fg(Color::Gray),
-                )));
-            }
-        }
-
-        // Beliefs
-        if !snap.beliefs.is_empty() {
-            lines.push(Line::raw(""));
-            lines.push(Line::from(Span::styled("BELIEFS", Style::default().fg(Color::DarkGray).add_modifier(Modifier::BOLD))));
-            for (about, belief) in snap.beliefs.iter().take(3) {
-                let text = format!("  About {}: {}", about, belief);
-                let truncated = if text.len() > (panel_width as usize).saturating_sub(2) {
-                    format!("{}…", &text[..(panel_width as usize).saturating_sub(3)])
-                } else {
-                    text
-                };
-                lines.push(Line::from(Span::styled(
-                    truncated,
-                    Style::default().fg(Color::LightMagenta),
-                )));
-            }
-        }
-
-        let para = Paragraph::new(lines).block(block);
         f.render_widget(ratatui::widgets::Clear, panel_area);
-        f.render_widget(para, panel_area);
+        self.render_agent_detail_content(f, panel_area, snap, 0);
     }
 
     fn render_legend_overlay(&self, f: &mut ratatui::Frame, map_area: ratatui::layout::Rect) {

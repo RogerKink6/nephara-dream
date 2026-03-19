@@ -379,11 +379,11 @@ async fn run_streaming(
         world.run_log.write_line(&footer);
 
         if result.tick > 0 && result.tick % cfg.simulation.state_dump_interval == 0 {
-            log::write_state_dump(&world.run_log.run_id, result.tick, &world.agents, seed);
+            log::write_state_dump(&world.run_log.run_id, &world.agents, seed);
         }
     }
 
-    log::write_state_dump(&world.run_log.run_id, total_ticks, &world.agents, seed);
+    log::write_state_dump(&world.run_log.run_id, &world.agents, seed);
 
     if let Err(e) = world.end_of_run_desires().await {
         warn!("End-of-run desires failed: {}", e);
@@ -397,26 +397,22 @@ async fn run_streaming(
     }).collect();
 
     if !world.is_test_run {
+        let run_id = world.run_log.run_id.clone();
         for (i, agent) in world.agents.iter().enumerate() {
-            log::append_journal(
-                souls_dir,
-                agent.name(),
-                &world.run_log.run_id,
-                total_ticks,
-                &notable_by_agent[i],
+            let journal_content = if notable_by_agent[i].is_empty() {
+                "A quiet run. Nothing of great note occurred.".to_string()
+            } else {
+                notable_by_agent[i].iter().map(|e| format!("- {}", e)).collect::<Vec<_>>().join("\n")
+            };
+            let day = total_ticks / cfg.time.ticks_per_day + 1;
+            let tod = log::time_of_day(total_ticks % cfg.time.ticks_per_day, cfg.time.night_start_tick);
+            log::append_chronicle(
+                souls_dir, agent.name(), &run_id, day, total_ticks, tod, "journal", &journal_content,
             );
-        }
-        // FEAT-21: persist attribute growth; FEAT-18: persist relationships; FEAT-23: persist beliefs
-        for agent in &world.agents {
-            log::save_growth(
-                souls_dir, agent.name(), &world.run_log.run_id,
-                &agent.attributes, &agent.attribute_xp,
-            );
-            log::save_relationships(
-                souls_dir, agent.name(), &world.run_log.run_id, &agent.affinity,
-            );
-            log::save_beliefs(
-                souls_dir, agent.name(), &world.run_log.run_id, &agent.beliefs,
+            log::save_state(
+                souls_dir, agent.name(), &run_id,
+                &agent.life_story, &agent.attributes, &agent.attribute_xp,
+                &agent.affinity, &agent.beliefs,
             );
         }
     }

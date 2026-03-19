@@ -1,0 +1,1 @@
+The forest offered no comfort, only the cold bite of wind against my face and the stubborn ache in my shoulder from yesterday's struggle. I walked until the trees thinned, forcing me to confront the raw, unfiltered fear that the boar's attack has left me with, a feeling that no amount of observation or silence can truly erase.

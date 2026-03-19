@@ -145,21 +145,21 @@ pub async fn run_simulation(
         let footer = runlog::needs_footer(&world.agents);
         world.run_log.write_line(&footer);
 
-        // State dump
+        // State dump (single file, overwritten each interval)
         if result.tick > 0 && result.tick % world.config.simulation.state_dump_interval == 0 {
-            runlog::write_state_dump(&world.run_log.run_id, result.tick, &world.agents, seed);
+            runlog::write_state_dump(&world.run_log.run_id, &world.agents, seed);
         }
     }
 
     // Final state dump
-    runlog::write_state_dump(&world.run_log.run_id, total_ticks, &world.agents, seed);
+    runlog::write_state_dump(&world.run_log.run_id, &world.agents, seed);
 
     // End-of-run desires
     if let Err(e) = world.end_of_run_desires().await {
         warn!("End-of-run desires failed: {}", e);
     }
 
-    // Journal
+    // End-of-run persistence
     let notable_by_agent: Vec<Vec<String>> = world.agents.iter().map(|a| {
         world.notable_events.iter()
             .filter(|(id, _)| *id == a.id)
@@ -168,26 +168,24 @@ pub async fn run_simulation(
     }).collect();
 
     if !world.is_test_run {
+        let run_id = world.run_log.run_id.clone();
         for (i, agent) in world.agents.iter().enumerate() {
-            runlog::append_journal(
-                &souls_dir,
-                agent.name(),
-                &world.run_log.run_id,
-                total_ticks,
-                &notable_by_agent[i],
+            // Chronicle: run summary journal entry
+            let journal_content = if notable_by_agent[i].is_empty() {
+                "A quiet run. Nothing of great note occurred.".to_string()
+            } else {
+                notable_by_agent[i].iter().map(|e| format!("- {}", e)).collect::<Vec<_>>().join("\n")
+            };
+            let day = total_ticks / world.config.time.ticks_per_day + 1;
+            let tod = runlog::time_of_day(total_ticks % world.config.time.ticks_per_day, world.config.time.night_start_tick);
+            runlog::append_chronicle(
+                &souls_dir, agent.name(), &run_id, day, total_ticks, tod, "journal", &journal_content,
             );
-        }
-        // FEAT-21: persist attribute growth; FEAT-18: persist relationships; FEAT-23: persist beliefs
-        for agent in &world.agents {
-            runlog::save_growth(
-                &souls_dir, agent.name(), &world.run_log.run_id,
-                &agent.attributes, &agent.attribute_xp,
-            );
-            runlog::save_relationships(
-                &souls_dir, agent.name(), &world.run_log.run_id, &agent.affinity,
-            );
-            runlog::save_beliefs(
-                &souls_dir, agent.name(), &world.run_log.run_id, &agent.beliefs,
+            // State: consolidated save (story, attributes, relationships, beliefs)
+            runlog::save_state(
+                &souls_dir, agent.name(), &run_id,
+                &agent.life_story, &agent.attributes, &agent.attribute_xp,
+                &agent.affinity, &agent.beliefs,
             );
         }
     }

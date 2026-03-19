@@ -1,5 +1,6 @@
 use std::fs::{self, OpenOptions};
 use std::io::Write as IoWrite;
+use std::collections::HashMap;
 
 use chrono::Local;
 use colored::Colorize;
@@ -216,21 +217,20 @@ impl TickEntry {
 }
 
 // ---------------------------------------------------------------------------
-// State dump (JSON snapshot)
+// State dump (JSON snapshot) — single file, overwritten each dump interval
 // ---------------------------------------------------------------------------
 
 pub fn write_state_dump(
-    run_id:  &str,
-    tick:    u32,
-    agents:  &[Agent],
-    seed:    u64,
+    run_id: &str,
+    agents: &[Agent],
+    seed:   u64,
 ) {
     let dir  = format!("runs/{}", run_id);
-    let path = format!("{}/state_dump_tick_{:04}.json", dir, tick);
+    let path = format!("{}/state_dump.json", dir);
 
     let state = serde_json::json!({
         "seed":  seed,
-        "tick":  tick,
+        "tick":  agents.first().map(|_| 0u32).unwrap_or(0),
         "agents": agents.iter().map(|a| serde_json::json!({
             "name":     a.name(),
             "pos":      [a.pos.0, a.pos.1],
@@ -267,115 +267,31 @@ pub fn log_introspection(run_id: &str, agent_name: &str, day: u32, call_type: &s
 }
 
 // ---------------------------------------------------------------------------
-// Wishes file
+// Chronicle — unified append-only log (replaces prayers, praises, etc.)
 // ---------------------------------------------------------------------------
 
-pub fn append_wishes(souls_dir: &str, agent_name: &str, header: &str, content: &str) {
-    let path  = format!("{}/{}.wishes.md", souls_dir, agent_name.to_lowercase());
-    let entry = format!("\n{}\n{}\n", header, content);
-    let file  = OpenOptions::new().create(true).append(true).open(&path);
-    match file {
-        Ok(mut f) => { let _ = f.write_all(entry.as_bytes()); }
-        Err(e)    => warn!("Could not append wishes for {}: {}", agent_name, e),
-    }
-}
-
-// ---------------------------------------------------------------------------
-// Prayer persistence
-// ---------------------------------------------------------------------------
-
-// FEAT-8: Richer headers with run_id, day, tick, tod.
-pub fn append_prayer(
+/// Append a timestamped entry to `souls/{name}.chronicle.md`.
+/// Header format: `## Run {run_id} | Day {day} | Tick {tick} | {tod} | {date} | {entry_type}`
+pub fn append_chronicle(
     souls_dir:  &str,
-    agent_name: &str,
+    name:       &str,
     run_id:     &str,
     day:        u32,
     tick:       u32,
     tod:        &str,
+    entry_type: &str,
     content:    &str,
 ) {
-    let path  = format!("{}/{}.prayers.md", souls_dir, agent_name.to_lowercase());
+    let path  = format!("{}/{}.chronicle.md", souls_dir, name.to_lowercase());
     let date  = Local::now().format("%Y-%m-%d");
-    let header = format!("## Run {} | Day {} | Tick {} | {} | {}", run_id, day, tick, tod, date);
-    let entry = format!("\n{}\n{}\n", header, content);
+    let entry = format!(
+        "\n## Run {} | Day {} | Tick {} | {} | {} | {}\n{}\n",
+        run_id, day, tick, tod, date, entry_type, content
+    );
     let file  = OpenOptions::new().create(true).append(true).open(&path);
     match file {
         Ok(mut f) => { let _ = f.write_all(entry.as_bytes()); }
-        Err(e)    => warn!("Could not append prayer for {}: {}", agent_name, e),
-    }
-}
-
-// ---------------------------------------------------------------------------
-// Praise persistence (FEAT-15)
-// ---------------------------------------------------------------------------
-
-pub fn append_praise(
-    souls_dir:  &str,
-    agent_name: &str,
-    run_id:     &str,
-    day:        u32,
-    tick:       u32,
-    tod:        &str,
-    content:    &str,
-) {
-    let path  = format!("{}/{}.praises.md", souls_dir, agent_name.to_lowercase());
-    let date  = Local::now().format("%Y-%m-%d");
-    let header = format!("## Run {} | Day {} | Tick {} | {} | {}", run_id, day, tick, tod, date);
-    let entry = format!("\n{}\n{}\n", header, content);
-    let file  = OpenOptions::new().create(true).append(true).open(&path);
-    match file {
-        Ok(mut f) => { let _ = f.write_all(entry.as_bytes()); }
-        Err(e)    => warn!("Could not append praise for {}: {}", agent_name, e),
-    }
-}
-
-// ---------------------------------------------------------------------------
-// Admiration persistence (FEAT-24)
-// ---------------------------------------------------------------------------
-
-pub fn append_admiration(
-    souls_dir:    &str,
-    agent_name:   &str,
-    run_id:       &str,
-    day:          u32,
-    tick:         u32,
-    tod:          &str,
-    content:      &str,
-) {
-    let path  = format!("{}/{}.admirations.md", souls_dir, agent_name.to_lowercase());
-    let date  = Local::now().format("%Y-%m-%d");
-    let header = format!("## Run {} | Day {} | Tick {} | {} | {}", run_id, day, tick, tod, date);
-    let entry = format!("\n{}\n{}\n", header, content);
-    let file  = OpenOptions::new().create(true).append(true).open(&path);
-    match file {
-        Ok(mut f) => { let _ = f.write_all(entry.as_bytes()); }
-        Err(e)    => warn!("Could not append admiration for {}: {}", agent_name, e),
-    }
-}
-
-// ---------------------------------------------------------------------------
-// Haiku persistence (FEAT-16)
-// ---------------------------------------------------------------------------
-
-pub fn append_haiku(
-    souls_dir:  &str,
-    agent_name: &str,
-    run_id:     &str,
-    day:        u32,
-    tick:       u32,
-    tod:        &str,
-    haiku:      &str,
-    score:      u32,
-    verdict:    &str,
-) {
-    let path  = format!("{}/{}.haikus.md", souls_dir, agent_name.to_lowercase());
-    let date  = Local::now().format("%Y-%m-%d");
-    let header = format!("## Run {} | Day {} | Tick {} | {} | {} | Score: {}", run_id, day, tick, tod, date, score);
-    let entry = format!("\n{}\n{}\n\n*{}*\n", header, haiku, verdict);
-    let file  = OpenOptions::new().create(true).append(true).open(&path);
-    match file {
-        Ok(mut f) => { let _ = f.write_all(entry.as_bytes()); }
-        Err(e)    => warn!("Could not append haiku for {}: {}", agent_name, e),
+        Err(e)    => warn!("Could not append chronicle ({}) for {}: {}", entry_type, name, e),
     }
 }
 
@@ -388,18 +304,18 @@ pub fn load_oracle_response(souls_dir: &str, agent_name: &str) -> String {
     fs::read_to_string(&path).unwrap_or_default()
 }
 
-// FEAT-8: Richer header with run_id and day.
-pub fn archive_oracle_response(souls_dir: &str, agent_name: &str, run_id: &str, day: u32, content: &str) {
-    // Append to history
-    let history_path = format!("{}/{}.oracle_history.md", souls_dir, agent_name.to_lowercase());
-    let date  = Local::now().format("%Y-%m-%d");
-    let entry = format!("\n## {} | Run {} | Day {} — {}\n{}\n", agent_name, run_id, day, date, content);
-    let file  = OpenOptions::new().create(true).append(true).open(&history_path);
-    match file {
-        Ok(mut f) => { let _ = f.write_all(entry.as_bytes()); }
-        Err(e)    => warn!("Could not append oracle history for {}: {}", agent_name, e),
-    }
-    // Clear the response file
+/// Archive oracle response to chronicle and clear the oracle_responses.md file.
+pub fn archive_oracle_response(
+    souls_dir:  &str,
+    agent_name: &str,
+    run_id:     &str,
+    day:        u32,
+    tick:       u32,
+    tod:        &str,
+    content:    &str,
+) {
+    append_chronicle(souls_dir, agent_name, run_id, day, tick, tod, "oracle", content);
+    // Clear the response file so the oracle is not re-read
     let response_path = format!("{}/{}.oracle_responses.md", souls_dir, agent_name.to_lowercase());
     if let Err(e) = fs::write(&response_path, "") {
         warn!("Could not clear oracle responses for {}: {}", agent_name, e);
@@ -407,119 +323,13 @@ pub fn archive_oracle_response(souls_dir: &str, agent_name: &str, run_id: &str, 
 }
 
 // ---------------------------------------------------------------------------
-// Attribute growth persistence (FEAT-21)
+// Journal excerpt loader — reads chronicle.md, filters journal entries
 // ---------------------------------------------------------------------------
 
-/// Saved attribute scores + XP. Applies on top of soul seed values.
-pub struct GrowthData {
-    pub scores: std::collections::HashMap<String, u32>,
-    pub xp:     std::collections::HashMap<String, u32>,
-}
-
-/// Load grown attribute scores and XP from `souls/{name}.growth.md`.
-/// Returns empty maps if the file is missing or unparseable.
-pub fn load_growth(souls_dir: &str, name: &str) -> GrowthData {
-    let path    = format!("{}/{}.growth.md", souls_dir, name.to_lowercase());
-    let content = match fs::read_to_string(&path) { Ok(s) => s, Err(_) => return GrowthData { scores: Default::default(), xp: Default::default() } };
-    let mut scores = std::collections::HashMap::new();
-    let mut xp     = std::collections::HashMap::new();
-    for line in content.lines() {
-        // Format: "- vigor: 7 xp: 2"
-        let line = line.trim().trim_start_matches('-').trim();
-        let parts: Vec<&str> = line.split_whitespace().collect();
-        if parts.len() >= 4 && parts[2] == "xp:" {
-            // "vigor:" "7" "xp:" "2"  → strip trailing ':'
-            if let (Some(attr), Ok(score), Ok(x)) = (
-                parts[0].strip_suffix(':'),
-                parts[1].parse::<u32>(),
-                parts[3].parse::<u32>(),
-            ) {
-                scores.insert(attr.to_string(), score);
-                xp.insert(attr.to_string(), x);
-            }
-        }
-    }
-    GrowthData { scores, xp }
-}
-
-/// Overwrite `souls/{name}.growth.md` with the agent's current attribute scores and XP.
-pub fn save_growth(
-    souls_dir: &str,
-    name:      &str,
-    run_id:    &str,
-    attrs:     &crate::agent::Attributes,
-    xp:        &std::collections::HashMap<String, u32>,
-) {
-    let path = format!("{}/{}.growth.md", souls_dir, name.to_lowercase());
-    let date = Local::now().format("%Y-%m-%d");
-    let body = format!(
-        "# Attribute Growth — {}\nLast updated: Run {} — {}\n\n- vigor: {} xp: {}\n- wit: {} xp: {}\n- grace: {} xp: {}\n- heart: {} xp: {}\n- numen: {} xp: {}\n",
-        name, run_id, date,
-        attrs.vigor, xp.get("vigor").copied().unwrap_or(0),
-        attrs.wit,   xp.get("wit")  .copied().unwrap_or(0),
-        attrs.grace, xp.get("grace").copied().unwrap_or(0),
-        attrs.heart, xp.get("heart").copied().unwrap_or(0),
-        attrs.numen, xp.get("numen").copied().unwrap_or(0),
-    );
-    if let Err(e) = fs::write(&path, body) {
-        warn!("Could not save growth for {}: {}", name, e);
-    }
-}
-
-// ---------------------------------------------------------------------------
-// Relationship persistence (FEAT-18)
-// ---------------------------------------------------------------------------
-
-/// Append current affinity values to `souls/{name}.relationships.md`.
-pub fn save_relationships(
-    souls_dir: &str,
-    name:      &str,
-    run_id:    &str,
-    affinity:  &std::collections::HashMap<String, f32>,
-) {
-    if affinity.is_empty() { return; }
-    let path  = format!("{}/{}.relationships.md", souls_dir, name.to_lowercase());
-    let date  = Local::now().format("%Y-%m-%d");
-    let mut entry = format!("\n## Run {} — {}\n", run_id, date);
-    let mut pairs: Vec<_> = affinity.iter().collect();
-    pairs.sort_by_key(|(k, _)| k.as_str());
-    for (other, v) in pairs {
-        entry.push_str(&format!("- {}: {:.1}\n", other, v));
-    }
-    let file = OpenOptions::new().create(true).append(true).open(&path);
-    match file {
-        Ok(mut f) => { let _ = f.write_all(entry.as_bytes()); }
-        Err(e)    => warn!("Could not save relationships for {}: {}", name, e),
-    }
-}
-
-/// Load the most recent affinity values for each named agent from
-/// `souls/{name}.relationships.md`.
-pub fn load_relationships(souls_dir: &str, name: &str) -> std::collections::HashMap<String, f32> {
-    let path    = format!("{}/{}.relationships.md", souls_dir, name.to_lowercase());
-    let content = match fs::read_to_string(&path) { Ok(s) => s, Err(_) => return Default::default() };
-    let mut map: std::collections::HashMap<String, f32> = Default::default();
-    for line in content.lines() {
-        // Format: "- Rowan: 15.0"
-        let line = line.trim().trim_start_matches('-').trim();
-        if let Some((k, v)) = line.split_once(':') {
-            if let Ok(val) = v.trim().parse::<f32>() {
-                map.insert(k.trim().to_string(), val);
-            }
-        }
-    }
-    map
-}
-
-// ---------------------------------------------------------------------------
-// Journal excerpt loader (FEAT-20)
-// ---------------------------------------------------------------------------
-
-/// Read the last `n_days` narrative day-sections from an agent's journal file.
-/// Day sections are those whose header matches "## Run ... Day ... —".
+/// Read the last `n_days` journal-type sections from an agent's chronicle file.
 /// Returns an empty string when no sections are found or the file is missing.
 pub fn load_journal_excerpt(souls_dir: &str, name: &str, n_days: usize) -> String {
-    let path = format!("{}/{}.journal.md", souls_dir, name.to_lowercase());
+    let path = format!("{}/{}.chronicle.md", souls_dir, name.to_lowercase());
     let content = match fs::read_to_string(&path) {
         Ok(s) => s,
         Err(_) => return String::new(),
@@ -529,13 +339,15 @@ pub fn load_journal_excerpt(souls_dir: &str, name: &str, n_days: usize) -> Strin
     let mut current: Option<String> = None;
 
     for line in content.lines() {
-        // Detect day-narrative headers: "## Run ... Day ... — date"
-        if line.starts_with("## Run ") && line.contains(" Day ") && line.contains(" — ") {
+        if line.starts_with("## ") {
+            // Header format: "## Run {run_id} | Day {day} | Tick {tick} | {tod} | {date} | {entry_type}"
+            // Field index 5 (0-based) is the entry_type when splitting on " | "
+            let parts: Vec<&str> = line.splitn(7, " | ").collect();
+            let is_journal = parts.get(5).map(|s| *s == "journal").unwrap_or(false);
             if let Some(s) = current.take() { sections.push(s); }
-            current = Some(format!("{}\n", line));
-        } else if line.starts_with("## ") {
-            // Some other header (e.g. bullet-list run summary) — flush and skip
-            if let Some(s) = current.take() { sections.push(s); }
+            if is_journal {
+                current = Some(format!("{}\n", line));
+            }
         } else if let Some(ref mut s) = current {
             s.push_str(line);
             s.push('\n');
@@ -550,130 +362,162 @@ pub fn load_journal_excerpt(souls_dir: &str, name: &str, n_days: usize) -> Strin
 }
 
 // ---------------------------------------------------------------------------
-// Story persistence
+// Agent state persistence — replaces story, growth, relationships, beliefs
 // ---------------------------------------------------------------------------
 
-pub fn load_story(souls_dir: &str, name: &str) -> String {
-    let path = format!("{}/{}.story.md", souls_dir, name.to_lowercase());
-    fs::read_to_string(&path).unwrap_or_default()
+/// Consolidated agent state loaded at startup.
+pub struct AgentState {
+    pub story:         String,
+    pub scores:        HashMap<String, u32>,
+    pub xp:            HashMap<String, u32>,
+    pub relationships: HashMap<String, f32>,
+    pub beliefs:       HashMap<String, AgentBeliefs>,
 }
 
-pub fn save_story(souls_dir: &str, name: &str, story: &str) {
-    let path = format!("{}/{}.story.md", souls_dir, name.to_lowercase());
-    if let Err(e) = fs::write(&path, story) {
-        warn!("Could not save story for {}: {}", name, e);
+impl Default for AgentState {
+    fn default() -> Self {
+        AgentState {
+            story:         String::new(),
+            scores:        HashMap::new(),
+            xp:            HashMap::new(),
+            relationships: HashMap::new(),
+            beliefs:       HashMap::new(),
+        }
     }
 }
 
-pub fn append_day_journal(souls_dir: &str, agent_name: &str, run_id: &str, day: u32, story: &str) {
-    let path  = format!("{}/{}.journal.md", souls_dir, agent_name.to_lowercase());
-    let date  = Local::now().format("%Y-%m-%d");
-    let entry = format!("\n## Run {} Day {} — {}\n{}\n", run_id, day, date, story);
-    let file  = OpenOptions::new().create(true).append(true).open(&path);
-    match file {
-        Ok(mut f) => { let _ = f.write_all(entry.as_bytes()); }
-        Err(e)    => warn!("Could not append day journal for {}: {}", agent_name, e),
+/// Load consolidated agent state from `souls/{name}.state.md`.
+/// Returns defaults if the file is missing or unparseable.
+pub fn load_state(souls_dir: &str, name: &str) -> AgentState {
+    let path    = format!("{}/{}.state.md", souls_dir, name.to_lowercase());
+    let content = match fs::read_to_string(&path) {
+        Ok(s)  => s,
+        Err(_) => return AgentState::default(),
+    };
+
+    let mut state   = AgentState::default();
+    let mut section = "";
+    let mut story_lines: Vec<String> = Vec::new();
+
+    for line in content.lines() {
+        if line.starts_with("## ") {
+            // Flush story if we just finished that section
+            if section == "story" {
+                state.story = story_lines.join("\n").trim().to_string();
+            }
+            section = match line.trim() {
+                "## Story"         => "story",
+                "## Attributes"    => "attributes",
+                "## Relationships" => "relationships",
+                "## Beliefs"       => "beliefs",
+                _                  => "",
+            };
+            story_lines.clear();
+            continue;
+        }
+
+        match section {
+            "story" => {
+                story_lines.push(line.to_string());
+            }
+            "attributes" => {
+                // Format: "vigor: 3 xp: 0"
+                let parts: Vec<&str> = line.split_whitespace().collect();
+                if parts.len() >= 4 && parts[2] == "xp:" {
+                    if let (Some(attr), Ok(score), Ok(x)) = (
+                        parts[0].strip_suffix(':'),
+                        parts[1].parse::<u32>(),
+                        parts[3].parse::<u32>(),
+                    ) {
+                        state.scores.insert(attr.to_string(), score);
+                        state.xp.insert(attr.to_string(), x);
+                    }
+                }
+            }
+            "relationships" => {
+                // Format: "Rowan: 25.0"
+                let line = line.trim();
+                if let Some((k, v)) = line.split_once(':') {
+                    if let Ok(val) = v.trim().parse::<f32>() {
+                        state.relationships.insert(k.trim().to_string(), val);
+                    }
+                }
+            }
+            "beliefs" => {
+                // Format: `Rowan: "some rumor text"`
+                let line = line.trim();
+                if let Some(colon_pos) = line.find(':') {
+                    let about = line[..colon_pos].trim();
+                    let rest  = line[colon_pos + 1..].trim();
+                    let rumor = rest.trim_matches('"');
+                    if !about.is_empty() && !rumor.is_empty() {
+                        state.beliefs
+                            .entry(about.to_string())
+                            .or_insert_with(AgentBeliefs::default)
+                            .rumors
+                            .push(rumor.to_string());
+                    }
+                }
+            }
+            _ => {}
+        }
     }
+    // Flush story if it was the last section
+    if section == "story" {
+        state.story = story_lines.join("\n").trim().to_string();
+    }
+
+    state
 }
 
-// ---------------------------------------------------------------------------
-// Journal append
-// ---------------------------------------------------------------------------
-
-pub fn append_journal(
-    souls_dir:      &str,
-    agent_name:     &str,
-    run_id:         &str,
-    ticks:          u32,
-    notable_events: &[String],
+/// Overwrite `souls/{name}.state.md` with the agent's current state.
+pub fn save_state(
+    souls_dir:     &str,
+    name:          &str,
+    run_id:        &str,
+    story:         &str,
+    attrs:         &crate::agent::Attributes,
+    xp:            &HashMap<String, u32>,
+    relationships: &HashMap<String, f32>,
+    beliefs:       &HashMap<String, AgentBeliefs>,
 ) {
-    let days    = ticks / 48;
-    let path    = format!("{}/{}.journal.md", souls_dir, agent_name.to_lowercase());
-    let date    = Local::now().format("%Y-%m-%d");
+    let path = format!("{}/{}.state.md", souls_dir, name.to_lowercase());
+    let date = Local::now().format("%Y-%m-%d");
 
-    let mut entry = format!(
-        "\n## Run {} — {} — {} day{} ({} ticks)\n",
-        run_id,
-        date,
-        days,
-        if days == 1 { "" } else { "s" },
-        ticks,
+    let mut body = format!(
+        "# State — {}\nLast run: {} | {}\n\n## Story\n{}\n\n## Attributes\nvigor: {} xp: {}\nwit: {} xp: {}\ngrace: {} xp: {}\nheart: {} xp: {}\nnumen: {} xp: {}\n",
+        name, run_id, date,
+        story.trim(),
+        attrs.vigor, xp.get("vigor").copied().unwrap_or(0),
+        attrs.wit,   xp.get("wit")  .copied().unwrap_or(0),
+        attrs.grace, xp.get("grace").copied().unwrap_or(0),
+        attrs.heart, xp.get("heart").copied().unwrap_or(0),
+        attrs.numen, xp.get("numen").copied().unwrap_or(0),
     );
 
-    if notable_events.is_empty() {
-        entry.push_str("- A quiet run. Nothing of great note occurred.\n");
-    } else {
-        for event in notable_events {
-            entry.push_str(&format!("- {}\n", event));
+    if !relationships.is_empty() {
+        body.push_str("\n## Relationships\n");
+        let mut pairs: Vec<_> = relationships.iter().collect();
+        pairs.sort_by_key(|(k, _)| k.as_str());
+        for (other, v) in pairs {
+            body.push_str(&format!("{}: {:.1}\n", other, v));
         }
     }
 
-    let file = OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(&path);
-
-    match file {
-        Ok(mut f) => { let _ = f.write_all(entry.as_bytes()); }
-        Err(e)    => warn!("Could not append journal for {}: {}", agent_name, e),
-    }
-}
-
-// ---------------------------------------------------------------------------
-// Belief persistence (FEAT-22/23)
-// ---------------------------------------------------------------------------
-
-/// Append current beliefs to `souls/{name}.beliefs.md` (append-only).
-pub fn save_beliefs(
-    souls_dir: &str,
-    name:      &str,
-    run_id:    &str,
-    beliefs:   &std::collections::HashMap<String, AgentBeliefs>,
-) {
-    if beliefs.is_empty() { return; }
-    let path  = format!("{}/{}.beliefs.md", souls_dir, name.to_lowercase());
-    let date  = Local::now().format("%Y-%m-%d");
-    let mut entry = format!("\n## Run {} — {}\n", run_id, date);
-    let mut pairs: Vec<_> = beliefs.iter().collect();
-    pairs.sort_by_key(|(k, _)| k.as_str());
-    for (about, ab) in pairs {
-        for rumor in &ab.rumors {
-            entry.push_str(&format!("- {}: \"{}\"\n", about, rumor));
-        }
-    }
-    let file = OpenOptions::new().create(true).append(true).open(&path);
-    match file {
-        Ok(mut f) => { let _ = f.write_all(entry.as_bytes()); }
-        Err(e)    => warn!("Could not save beliefs for {}: {}", name, e),
-    }
-}
-
-/// Load accumulated beliefs from `souls/{name}.beliefs.md`.
-/// Returns empty map if file absent or unparseable.
-pub fn load_beliefs(souls_dir: &str, name: &str) -> std::collections::HashMap<String, AgentBeliefs> {
-    let path    = format!("{}/{}.beliefs.md", souls_dir, name.to_lowercase());
-    let content = match fs::read_to_string(&path) { Ok(s) => s, Err(_) => return Default::default() };
-    let mut map: std::collections::HashMap<String, AgentBeliefs> = Default::default();
-    for line in content.lines() {
-        // Format: "- Rowan: \"some rumor text\""
-        let line = line.trim();
-        if !line.starts_with('-') { continue; }
-        let line = line.trim_start_matches('-').trim();
-        // Split on first `: "` to get name and rumor
-        if let Some(colon_pos) = line.find(':') {
-            let about = line[..colon_pos].trim();
-            let rest  = line[colon_pos + 1..].trim();
-            // Strip surrounding quotes if present
-            let rumor = rest.trim_matches('"');
-            if !about.is_empty() && !rumor.is_empty() {
-                map.entry(about.to_string())
-                    .or_insert_with(AgentBeliefs::default)
-                    .rumors
-                    .push(rumor.to_string());
+    if !beliefs.is_empty() {
+        body.push_str("\n## Beliefs\n");
+        let mut pairs: Vec<_> = beliefs.iter().collect();
+        pairs.sort_by_key(|(k, _)| k.as_str());
+        for (about, ab) in pairs {
+            if let Some(rumor) = ab.rumors.last() {
+                body.push_str(&format!("{}: \"{}\"\n", about, rumor));
             }
         }
     }
-    map
+
+    if let Err(e) = fs::write(&path, body) {
+        warn!("Could not save state for {}: {}", name, e);
+    }
 }
 
 // ---------------------------------------------------------------------------
