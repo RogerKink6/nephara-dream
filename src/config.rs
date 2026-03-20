@@ -191,6 +191,8 @@ pub struct LlmConfig {
     /// Abort the stream if thinking-token accumulation exceeds this many characters.
     /// Prevents runaway chain-of-thought from consuming the entire context window.
     pub thinking_budget_chars:  Option<usize>,
+    /// Requests per minute limit for the llm CLI backend. 0 = unlimited.
+    pub rate_limit_rpm:         u32,
 }
 
 pub fn load(path: &str) -> Result<Config, Box<dyn std::error::Error + Send + Sync>> {

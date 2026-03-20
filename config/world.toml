@@ -132,6 +132,7 @@ narrator_max_tokens    = 1000
 desires_max_tokens     = 2000
 oracle_max_tokens             = 1500
 journal_summary_max_tokens    = 200
+rate_limit_rpm                = 0     # requests per minute for llm CLI backend; 0 = unlimited (e.g. 15 for free Gemini)
 
 [world]
 resource_respawn_ticks = 20

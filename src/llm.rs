@@ -3,6 +3,7 @@ use rand::rngs::StdRng;
 use rand::Rng;
 use serde::{Deserialize, Serialize};
 use std::sync::Mutex;
+use std::time::{Duration, Instant};
 use tokio::sync::mpsc::UnboundedSender;
 use tracing::{debug, info, warn};
 
@@ -634,6 +635,113 @@ impl LlmBackend for ClaudeCliBackend {
         let text = text.trim().to_string();
 
         debug!(target: "llm", chars = text.len(), response = %text, "Claude CLI response");
+        Ok(text)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Rate limiter — enforces a minimum interval between LLM calls
+// ---------------------------------------------------------------------------
+
+pub struct RateLimiter {
+    min_interval: Duration,
+    last_call:    Mutex<Option<Instant>>,
+}
+
+impl RateLimiter {
+    /// `rpm` must be > 0.
+    pub fn new(rpm: u32) -> Self {
+        assert!(rpm > 0, "RateLimiter: rpm must be > 0");
+        let min_interval = Duration::from_secs_f64(60.0 / rpm as f64);
+        RateLimiter { min_interval, last_call: Mutex::new(None) }
+    }
+
+    pub async fn wait(&self) {
+        let sleep_dur = {
+            let last = self.last_call.lock().expect("rate limiter poisoned");
+            match *last {
+                None       => Duration::ZERO,
+                Some(t)    => {
+                    let elapsed = t.elapsed();
+                    if elapsed >= self.min_interval {
+                        Duration::ZERO
+                    } else {
+                        self.min_interval - elapsed
+                    }
+                }
+            }
+        };
+        if sleep_dur > Duration::ZERO {
+            debug!(target: "llm", sleep_ms = sleep_dur.as_millis(), "rate limiter: sleeping");
+            tokio::time::sleep(sleep_dur).await;
+        }
+        let mut last = self.last_call.lock().expect("rate limiter poisoned");
+        *last = Some(Instant::now());
+    }
+}
+
+// ---------------------------------------------------------------------------
+// llm CLI backend — shells out to `llm -m <model>`
+// ---------------------------------------------------------------------------
+
+pub struct LlmCliBackend {
+    model:        String,
+    rate_limiter: Option<RateLimiter>,
+}
+
+impl LlmCliBackend {
+    /// `rpm == 0` disables rate limiting.
+    pub fn new(model: String, rpm: u32) -> Self {
+        let rate_limiter = if rpm > 0 { Some(RateLimiter::new(rpm)) } else { None };
+        LlmCliBackend { model, rate_limiter }
+    }
+}
+
+#[async_trait]
+impl LlmBackend for LlmCliBackend {
+    async fn generate(
+        &self,
+        prompt:      &str,
+        _max_tokens: u32,
+        _seed:       Option<u64>,
+        _schema:     Option<&serde_json::Value>,
+        _token_tx:   Option<UnboundedSender<String>>,
+    ) -> Result<String> {
+        use tokio::io::AsyncWriteExt;
+        use tokio::process::Command;
+
+        if let Some(ref rl) = self.rate_limiter {
+            rl.wait().await;
+        }
+
+        debug!(target: "llm", model = %self.model, prompt_chars = prompt.len(), "llm CLI request");
+
+        let mut child = Command::new("llm")
+            .args(["-m", &self.model])
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .map_err(|e| format!("Failed to spawn llm CLI: {}", e))?;
+
+        if let Some(mut stdin) = child.stdin.take() {
+            stdin.write_all(prompt.as_bytes()).await
+                .map_err(|e| format!("Failed to write to llm CLI stdin: {}", e))?;
+        }
+
+        let output = child.wait_with_output().await
+            .map_err(|e| format!("llm CLI wait error: {}", e))?;
+
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            return Err(format!("llm CLI exited with {}: {}", output.status, stderr.trim()).into());
+        }
+
+        let text = String::from_utf8(output.stdout)
+            .map_err(|e| format!("llm CLI output UTF-8 error: {}", e))?;
+        let text = text.trim().to_string();
+
+        debug!(target: "llm", chars = text.len(), response = %text, "llm CLI response");
         Ok(text)
     }
 }
