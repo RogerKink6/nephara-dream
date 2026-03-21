@@ -663,3 +663,32 @@ pub fn write_run_summary(
         warn!("Could not write run summary to {}: {}", path, e);
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // -----------------------------------------------------------------------
+    // strip_ansi
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn strip_ansi_removes_escape_sequences() {
+        let colored = "\x1b[31mhello\x1b[0m";
+        let plain = strip_ansi(colored);
+        assert_eq!(plain, "hello", "ANSI codes should be stripped");
+    }
+
+    #[test]
+    fn strip_ansi_plain_text_unchanged() {
+        let plain = "hello world";
+        let result = strip_ansi(plain);
+        assert_eq!(result, plain, "plain text should be unchanged");
+    }
+
+    #[test]
+    fn strip_ansi_empty_string() {
+        let result = strip_ansi("");
+        assert_eq!(result, "", "empty string should remain empty");
+    }
+}

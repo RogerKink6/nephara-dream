@@ -166,3 +166,101 @@ pub fn fallback_intent(intent: &str, energy_drain: f32) -> InterpretedIntent {
         memory_entry:    format!("Cast intent: \"{}\". Reality trembled faintly.", intent),
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // -----------------------------------------------------------------------
+    // parse_interpreter_response cascade
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn parse_interpreter_response_valid_json() {
+        let raw = r#"{"primary_effect":"A warmth settles.","interpretations":["warmth as belonging","warmth as memory"],"secondary_effect":"Those nearby feel welcome.","duration_ticks":2,"need_changes":{"fun":10,"energy":-8,"social":5},"memory_entry":"Cast intent: warmth."}"#;
+        let result = parse_interpreter_response(raw);
+        assert!(result.is_some(), "valid JSON should parse successfully");
+        let ii = result.unwrap();
+        assert_eq!(ii.duration_ticks, 2);
+        assert!(!ii.primary_effect.is_empty());
+    }
+
+    #[test]
+    fn parse_interpreter_response_code_fenced() {
+        let raw = "```json\n{\"primary_effect\":\"Light bends.\",\"interpretations\":[\"light as clarity\"],\"secondary_effect\":\"A crow watches.\",\"duration_ticks\":1,\"need_changes\":{\"fun\":8,\"energy\":-8},\"memory_entry\":\"Cast intent: light.\"}\n```";
+        let result = parse_interpreter_response(raw);
+        assert!(result.is_some(), "code-fenced JSON should parse successfully");
+    }
+
+    #[test]
+    fn parse_interpreter_response_returns_none_on_garbage() {
+        let result = parse_interpreter_response("this is not json at all !! xyz");
+        assert!(result.is_none(), "garbage input should return None");
+    }
+
+    #[test]
+    fn parse_interpreter_response_think_tags_stripped() {
+        let raw = r#"<think>Let me think about this carefully.</think>{"primary_effect":"Rain arrives.","interpretations":["rain as change"],"secondary_effect":"Birds take flight.","duration_ticks":1,"need_changes":{"fun":12,"energy":-8},"memory_entry":"Cast intent: rain."}"#;
+        let result = parse_interpreter_response(raw);
+        assert!(result.is_some(), "think-tag-wrapped JSON should parse after stripping");
+        let ii = result.unwrap();
+        assert!(!ii.primary_effect.is_empty());
+    }
+
+    // -----------------------------------------------------------------------
+    // Energy drain enforcement
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn interpreted_intent_energy_drain_enforced_when_llm_returns_less() {
+        let config = crate::config::load("config/world.toml").expect("config should load");
+        let drain = config.actions.cast_intent.energy_drain.unwrap_or(8.0);
+        // LLM returns -2.0 (less negative than drain), should be enforced to -drain
+        let ii = InterpretedIntent {
+            primary_effect:   "test".to_string(),
+            interpretations:  vec![],
+            secondary_effect: "test".to_string(),
+            duration_ticks:   1,
+            need_changes:     RawNeedChanges { energy: Some(-2.0), ..Default::default() },
+            memory_entry:     "test".to_string(),
+        };
+        let changes = ii.to_need_changes(&config);
+        let energy = changes.energy.expect("energy should be Some");
+        assert_eq!(energy, -drain,
+            "LLM returned -2.0 but drain is {}, so energy should be -{}", drain, drain);
+    }
+
+    #[test]
+    fn interpreted_intent_energy_drain_lets_larger_drain_through() {
+        let config = crate::config::load("config/world.toml").expect("config should load");
+        let drain = config.actions.cast_intent.energy_drain.unwrap_or(8.0);
+        // LLM returns a more-negative value than drain (e.g. -12.0)
+        let large_drain = -(drain + 4.0);
+        let ii = InterpretedIntent {
+            primary_effect:   "test".to_string(),
+            interpretations:  vec![],
+            secondary_effect: "test".to_string(),
+            duration_ticks:   1,
+            need_changes:     RawNeedChanges { energy: Some(large_drain), ..Default::default() },
+            memory_entry:     "test".to_string(),
+        };
+        let changes = ii.to_need_changes(&config);
+        let energy = changes.energy.expect("energy should be Some");
+        assert_eq!(energy, large_drain,
+            "LLM drain {} is larger than configured {}, should pass through", large_drain, -drain);
+    }
+
+    // -----------------------------------------------------------------------
+    // fallback_intent
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn fallback_intent_contains_intent_string() {
+        let intent = "I seek warmth";
+        let fi = fallback_intent(intent, 8.0);
+        assert!(fi.primary_effect.contains(intent),
+            "primary_effect should contain the intent string");
+        assert_eq!(fi.need_changes.energy, Some(-8.0));
+        assert_eq!(fi.duration_ticks, 1);
+    }
+}

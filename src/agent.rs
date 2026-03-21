@@ -483,3 +483,240 @@ impl Agent {
         w
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // -----------------------------------------------------------------------
+    // Test helpers
+    // -----------------------------------------------------------------------
+
+    fn minimal_config() -> crate::config::Config {
+        crate::config::load("config/world.toml").expect("config/world.toml should load")
+    }
+
+    fn minimal_soul_seed(name: &str) -> crate::soul::SoulSeed {
+        crate::soul::SoulSeed {
+            name:             name.to_string(),
+            vigor:            6,
+            wit:              6,
+            grace:            6,
+            heart:            6,
+            numen:            6,
+            specialty:        None,
+            personality:      "quiet and thoughtful".to_string(),
+            backstory:        "came from the hills".to_string(),
+            magical_affinity: "earth".to_string(),
+            self_declaration: "I seek understanding".to_string(),
+        }
+    }
+
+    fn minimal_agent(name: &str) -> Agent {
+        Agent::from_soul(0, &minimal_soul_seed(name), &minimal_config(), (5, 17))
+    }
+
+    // -----------------------------------------------------------------------
+    // Needs::apply clamping
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn needs_apply_clamps_above_100() {
+        let mut needs = Needs { hunger: 95.0, energy: 50.0, fun: 50.0, social: 50.0, hygiene: 50.0 };
+        let changes = NeedChanges { hunger: Some(20.0), energy: None, fun: None, social: None, hygiene: None };
+        needs.apply(&changes);
+        assert_eq!(needs.hunger, 100.0, "hunger should be clamped to 100.0, was {}", needs.hunger);
+    }
+
+    #[test]
+    fn needs_apply_clamps_below_zero() {
+        let mut needs = Needs { hunger: 50.0, energy: 3.0, fun: 50.0, social: 50.0, hygiene: 50.0 };
+        let changes = NeedChanges { hunger: None, energy: Some(-10.0), fun: None, social: None, hygiene: None };
+        needs.apply(&changes);
+        assert_eq!(needs.energy, 0.0, "energy should be clamped to 0.0, was {}", needs.energy);
+    }
+
+    #[test]
+    fn needs_apply_only_modifies_some_fields() {
+        let mut needs = Needs { hunger: 50.0, energy: 50.0, fun: 42.0, social: 33.0, hygiene: 77.0 };
+        let changes = NeedChanges { hunger: Some(10.0), energy: None, fun: None, social: None, hygiene: None };
+        needs.apply(&changes);
+        assert_eq!(needs.hunger,  60.0,  "hunger should increase");
+        assert_eq!(needs.energy,  50.0,  "energy unchanged");
+        assert_eq!(needs.fun,     42.0,  "fun unchanged");
+        assert_eq!(needs.social,  33.0,  "social unchanged");
+        assert_eq!(needs.hygiene, 77.0,  "hygiene unchanged");
+    }
+
+    // -----------------------------------------------------------------------
+    // Needs::penalty stacking
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn needs_penalty_hunger_severe() {
+        let config = minimal_config();
+        // Severe threshold from config is 10.0; set hunger to 5.0 (below severe)
+        let needs = Needs { hunger: 5.0, energy: 80.0, fun: 80.0, social: 80.0, hygiene: 80.0 };
+        // Hunger penalises all checks
+        let p = needs.penalty(&config, "vigor");
+        assert_eq!(p, -4, "severe hunger should give -4 penalty to vigor, got {}", p);
+    }
+
+    #[test]
+    fn needs_penalty_energy_physical_only() {
+        let config = minimal_config();
+        let needs = Needs { hunger: 80.0, energy: 5.0, fun: 80.0, social: 80.0, hygiene: 80.0 };
+        // Energy penalises physical checks (vigor, grace) only
+        let p_vigor = needs.penalty(&config, "vigor");
+        let p_wit   = needs.penalty(&config, "wit");
+        assert_eq!(p_vigor, -4, "severe energy should give -4 to vigor");
+        assert_eq!(p_wit, 0, "severe energy should NOT penalise wit");
+    }
+
+    #[test]
+    fn needs_penalty_fun_affects_all() {
+        let config = minimal_config();
+        // Fun severe (<10) adds -2 to ALL checks
+        let needs = Needs { hunger: 80.0, energy: 80.0, fun: 5.0, social: 80.0, hygiene: 80.0 };
+        let p_wit   = needs.penalty(&config, "wit");
+        let p_vigor = needs.penalty(&config, "vigor");
+        assert_eq!(p_wit,   -2, "severe fun should give -2 to wit");
+        assert_eq!(p_vigor, -2, "severe fun should give -2 to vigor");
+    }
+
+    #[test]
+    fn needs_penalty_social_hygiene_heart_only() {
+        let config = minimal_config();
+        // Social and hygiene <10 each give -2 to heart only
+        let needs = Needs { hunger: 80.0, energy: 80.0, fun: 80.0, social: 5.0, hygiene: 5.0 };
+        let p_heart = needs.penalty(&config, "heart");
+        let p_wit   = needs.penalty(&config, "wit");
+        assert_eq!(p_heart, -4, "severe social+hygiene should give -4 to heart");
+        assert_eq!(p_wit,    0, "social/hygiene should not penalise wit");
+    }
+
+    #[test]
+    fn needs_penalty_multiple_stacks() {
+        let config = minimal_config();
+        // hunger severe(-4) + energy severe(-4) + fun severe(-2) all at 5.0
+        // vigor is physical: hunger(-4) + energy(-4) + fun(-2) = -10
+        let needs = Needs { hunger: 5.0, energy: 5.0, fun: 5.0, social: 80.0, hygiene: 80.0 };
+        let p = needs.penalty(&config, "vigor");
+        assert_eq!(p, -10, "stacked penalties should sum to -10 for vigor, got {}", p);
+    }
+
+    // -----------------------------------------------------------------------
+    // update_belief cap
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn update_belief_adds_rumor() {
+        let mut agent = minimal_agent("Elara");
+        agent.update_belief("Rowan", "likes fish".to_string(), 5);
+        let beliefs = agent.beliefs.get("Rowan").expect("Rowan entry should exist");
+        assert_eq!(beliefs.rumors.len(), 1);
+        assert_eq!(beliefs.rumors[0], "likes fish");
+    }
+
+    #[test]
+    fn update_belief_drops_oldest_over_cap() {
+        let mut agent = minimal_agent("Elara");
+        for i in 0..6 {
+            agent.update_belief("Rowan", format!("rumor {}", i), 5);
+        }
+        let beliefs = agent.beliefs.get("Rowan").expect("should exist");
+        assert_eq!(beliefs.rumors.len(), 5, "should cap at 5");
+        // First rumor "rumor 0" should have been dropped
+        assert!(!beliefs.rumors.contains(&"rumor 0".to_string()), "oldest rumor should be gone");
+        assert!(beliefs.rumors.contains(&"rumor 5".to_string()), "newest rumor should be present");
+    }
+
+    #[test]
+    fn update_belief_drops_index_zero_not_last() {
+        let mut agent = minimal_agent("Elara");
+        agent.update_belief("Rowan", "A".to_string(), 2);
+        agent.update_belief("Rowan", "B".to_string(), 2);
+        agent.update_belief("Rowan", "C".to_string(), 2);
+        let beliefs = agent.beliefs.get("Rowan").expect("should exist");
+        assert_eq!(beliefs.rumors.len(), 2, "should cap at 2");
+        // A was added first → dropped; should have B and C
+        assert!(!beliefs.rumors.contains(&"A".to_string()), "A should be dropped (oldest)");
+        assert!(beliefs.rumors.contains(&"B".to_string()), "B should remain");
+        assert!(beliefs.rumors.contains(&"C".to_string()), "C should remain");
+    }
+
+    // -----------------------------------------------------------------------
+    // grant_xp leveling
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn grant_xp_levels_up_at_5_xp() {
+        let mut agent = minimal_agent("Elara");
+        // vigor starts at 6; 5 XP should level it up to 7
+        let mut leveled = None;
+        for _ in 0..5 {
+            leveled = agent.grant_xp("vigor");
+        }
+        assert!(leveled.is_some(), "5th XP should trigger level-up");
+        assert_eq!(leveled.unwrap(), 7, "vigor should go from 6 to 7");
+    }
+
+    #[test]
+    fn grant_xp_resets_counter_after_levelup() {
+        let mut agent = minimal_agent("Elara");
+        for _ in 0..5 { agent.grant_xp("vigor"); }
+        // After level-up, XP counter should be 0
+        let xp = agent.attribute_xp.get("vigor").copied().unwrap_or(0);
+        assert_eq!(xp, 0, "XP counter should reset to 0 after level-up");
+    }
+
+    #[test]
+    fn grant_xp_capped_at_10() {
+        let mut agent = minimal_agent("Elara");
+        agent.attributes.vigor = 10; // already at cap
+        // Grant 5 XP — should NOT level up since already at 10
+        let mut leveled = None;
+        for _ in 0..5 {
+            leveled = agent.grant_xp("vigor");
+        }
+        assert!(leveled.is_none(), "vigor at 10 should not level up");
+        assert_eq!(agent.attributes.vigor, 10, "vigor should remain 10");
+    }
+
+    #[test]
+    fn grant_xp_returns_none_for_empty_attr() {
+        let mut agent = minimal_agent("Elara");
+        let result = agent.grant_xp("");
+        assert!(result.is_none(), "empty attr should return None");
+    }
+
+    // -----------------------------------------------------------------------
+    // Inventory
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn add_item_respects_max_slots() {
+        let mut agent = minimal_agent("Elara");
+        agent.add_item(ItemKind::Berry, 3, 2); // max 2 slots
+        let total = agent.inventory_count();
+        assert_eq!(total, 2, "should only add up to max_slots (2), got {}", total);
+    }
+
+    #[test]
+    fn consume_item_returns_false_when_not_enough() {
+        let mut agent = minimal_agent("Elara");
+        agent.add_item(ItemKind::Fish, 1, 10);
+        let result = agent.consume_item(ItemKind::Fish, 5); // only have 1, need 5
+        assert!(!result, "should return false when not enough items");
+        assert_eq!(agent.inventory_count(), 1, "inventory should be unchanged");
+    }
+
+    #[test]
+    fn consume_item_removes_entry_at_zero() {
+        let mut agent = minimal_agent("Elara");
+        agent.add_item(ItemKind::Herb, 2, 10);
+        let result = agent.consume_item(ItemKind::Herb, 2); // consume all
+        assert!(result, "should return true when enough items");
+        assert!(!agent.inventory.contains_key(&ItemKind::Herb), "entry should be removed when count reaches 0");
+    }
+}

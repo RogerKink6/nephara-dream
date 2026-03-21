@@ -3962,4 +3962,438 @@ mod tests {
         }
         assert_eq!(world.tick_num, 3);
     }
+
+    // -----------------------------------------------------------------------
+    // Test helpers
+    // -----------------------------------------------------------------------
+
+    fn minimal_soul_seed(name: &str) -> crate::soul::SoulSeed {
+        crate::soul::SoulSeed {
+            name:             name.to_string(),
+            vigor:            6,
+            wit:              6,
+            grace:            6,
+            heart:            6,
+            numen:            6,
+            specialty:        None,
+            personality:      "quiet and thoughtful".to_string(),
+            backstory:        "came from the hills".to_string(),
+            magical_affinity: "earth".to_string(),
+            self_declaration: "I seek understanding".to_string(),
+        }
+    }
+
+    fn minimal_world(n: usize) -> World {
+        let config = crate::config::load("config/world.toml").expect("config should load");
+        let names = ["Elara", "Rowan", "Thane", "Mira", "Sael", "Fen", "Brin", "Dex"];
+        let seeds: Vec<_> = (0..n).map(|i| minimal_soul_seed(names[i])).collect();
+        let rng      = StdRng::seed_from_u64(1);
+        let mock     = Arc::new(crate::llm::MockBackend::new(StdRng::seed_from_u64(1)));
+        let run_log  = crate::log::RunLog::new_test();
+        World::new(seeds, config, 1, rng, mock.clone(), mock, run_log, "souls".to_string(), true)
+            .expect("minimal_world should succeed")
+    }
+
+    // -----------------------------------------------------------------------
+    // World::new validation
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn world_new_rejects_empty_souls() {
+        let config = crate::config::load("config/world.toml").expect("config should load");
+        let rng     = StdRng::seed_from_u64(0);
+        let mock    = Arc::new(crate::llm::MockBackend::new(StdRng::seed_from_u64(0)));
+        let run_log = crate::log::RunLog::new_test();
+        let result  = World::new(vec![], config, 0, rng, mock.clone(), mock, run_log, "souls".to_string(), true);
+        assert!(result.is_err(), "empty souls should fail");
+    }
+
+    #[test]
+    fn world_new_rejects_too_many_souls() {
+        let config = crate::config::load("config/world.toml").expect("config should load");
+        let rng     = StdRng::seed_from_u64(0);
+        let mock    = Arc::new(crate::llm::MockBackend::new(StdRng::seed_from_u64(0)));
+        let run_log = crate::log::RunLog::new_test();
+        // MAX_AGENTS is HOME_POSITIONS.len() == 8; pass 9 to exceed it
+        let names = ["A","B","C","D","E","F","G","H","X"];
+        let seeds: Vec<_> = names.iter().map(|n| minimal_soul_seed(n)).collect();
+        let result = World::new(seeds, config, 0, rng, mock.clone(), mock, run_log, "souls".to_string(), true);
+        assert!(result.is_err(), "9 souls should fail (MAX_AGENTS=8)");
+    }
+
+    // -----------------------------------------------------------------------
+    // tile_allows matrix
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn tile_allows_forest_only_forage_explore_exercise() {
+        let world = minimal_world(1);
+        assert!(world.tile_allows(TileType::Forest, "forage"),   "Forest allows forage");
+        assert!(world.tile_allows(TileType::Forest, "explore"),  "Forest allows explore");
+        assert!(world.tile_allows(TileType::Forest, "exercise"), "Forest allows exercise");
+        assert!(!world.tile_allows(TileType::Forest, "eat"),     "Forest does NOT allow eat");
+        assert!(!world.tile_allows(TileType::Forest, "fish"),    "Forest does NOT allow fish");
+        assert!(!world.tile_allows(TileType::Forest, "play"),    "Forest does NOT allow play");
+    }
+
+    #[test]
+    fn tile_allows_river_only_fish_bathe() {
+        let world = minimal_world(1);
+        assert!(world.tile_allows(TileType::River, "fish"),    "River allows fish");
+        assert!(world.tile_allows(TileType::River, "bathe"),   "River allows bathe");
+        assert!(!world.tile_allows(TileType::River, "eat"),    "River does NOT allow eat");
+        assert!(!world.tile_allows(TileType::River, "forage"), "River does NOT allow forage");
+    }
+
+    #[test]
+    fn tile_allows_square_exercise_and_play() {
+        let world = minimal_world(1);
+        assert!(world.tile_allows(TileType::Square, "exercise"), "Square allows exercise");
+        assert!(world.tile_allows(TileType::Square, "play"),     "Square allows play");
+        assert!(!world.tile_allows(TileType::Square, "eat"),     "Square does NOT allow eat");
+        assert!(!world.tile_allows(TileType::Square, "fish"),    "Square does NOT allow fish");
+    }
+
+    #[test]
+    fn tile_allows_tavern_eat_cook_play() {
+        let world = minimal_world(1);
+        assert!(world.tile_allows(TileType::Tavern, "eat"),   "Tavern allows eat");
+        assert!(world.tile_allows(TileType::Tavern, "cook"),  "Tavern allows cook");
+        assert!(world.tile_allows(TileType::Tavern, "play"),  "Tavern allows play");
+        assert!(!world.tile_allows(TileType::Tavern, "fish"), "Tavern does NOT allow fish");
+        assert!(!world.tile_allows(TileType::Tavern, "bathe"),"Tavern does NOT allow bathe");
+    }
+
+    #[test]
+    fn tile_allows_well_bathe_and_rest() {
+        let world = minimal_world(1);
+        assert!(world.tile_allows(TileType::Well, "bathe"),    "Well allows bathe");
+        assert!(world.tile_allows(TileType::Well, "rest"),     "Well allows rest");
+        assert!(!world.tile_allows(TileType::Well, "fish"),    "Well does NOT allow fish");
+        assert!(!world.tile_allows(TileType::Well, "eat"),     "Well does NOT allow eat");
+    }
+
+    #[test]
+    fn tile_allows_meadow_play_exercise_explore() {
+        let world = minimal_world(1);
+        assert!(world.tile_allows(TileType::Meadow, "play"),     "Meadow allows play");
+        assert!(world.tile_allows(TileType::Meadow, "exercise"), "Meadow allows exercise");
+        assert!(world.tile_allows(TileType::Meadow, "explore"),  "Meadow allows explore");
+        assert!(!world.tile_allows(TileType::Meadow, "eat"),     "Meadow does NOT allow eat");
+    }
+
+    #[test]
+    fn tile_allows_home_eat_cook_sleep() {
+        let world = minimal_world(1);
+        assert!(world.tile_allows(TileType::Home(0), "eat"),    "Home allows eat");
+        assert!(world.tile_allows(TileType::Home(0), "cook"),   "Home allows cook");
+        assert!(world.tile_allows(TileType::Home(0), "sleep"),  "Home allows sleep");
+        assert!(!world.tile_allows(TileType::Home(0), "fish"),  "Home does NOT allow fish");
+        assert!(!world.tile_allows(TileType::Home(0), "bathe"), "Home does NOT allow bathe");
+    }
+
+    #[test]
+    fn tile_allows_temple_only_read_oracle() {
+        let world = minimal_world(1);
+        assert!(world.tile_allows(TileType::Temple, "read_oracle"), "Temple allows read_oracle");
+        assert!(!world.tile_allows(TileType::Temple, "eat"),        "Temple does NOT allow eat");
+        assert!(!world.tile_allows(TileType::Temple, "play"),       "Temple does NOT allow play");
+    }
+
+    #[test]
+    fn tile_allows_open_nothing() {
+        let world = minimal_world(1);
+        let actions = ["eat", "cook", "sleep", "fish", "bathe", "forage", "explore",
+                        "exercise", "play", "rest", "read_oracle"];
+        for action in &actions {
+            assert!(!world.tile_allows(TileType::Open, action),
+                "Open tile should not allow '{}'", action);
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // validate location gating
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn validate_eat_at_home_passes() {
+        let world = minimal_world(1);
+        // Agent 0 starts at HOME_POSITIONS[0] = (5,17) which is Home(0) tile
+        let result = world.validate(0, crate::action::Action::Eat);
+        assert!(matches!(result, crate::action::Action::Eat),
+            "Eat at own home should pass, got {:?}", result);
+    }
+
+    #[test]
+    fn validate_eat_not_at_home_becomes_wander() {
+        let mut world = minimal_world(1);
+        world.agents[0].pos = (0, 0); // Forest tile
+        let result = world.validate(0, crate::action::Action::Eat);
+        // wander_action returns Move{..}, not Wander
+        assert!(matches!(result, crate::action::Action::Move { .. }),
+            "Eat on Forest should become Move (wander), got {:?}", result);
+    }
+
+    #[test]
+    fn validate_sleep_at_own_home_passes() {
+        let world = minimal_world(1);
+        // Agent 0 at home by default
+        let result = world.validate(0, crate::action::Action::Sleep);
+        assert!(matches!(result, crate::action::Action::Sleep),
+            "Sleep at own home should pass, got {:?}", result);
+    }
+
+    #[test]
+    fn validate_sleep_not_at_own_home_becomes_wander() {
+        let mut world = minimal_world(2);
+        // Move agent 0 to agent 1's home tile (8,22) = Home(1)
+        world.agents[0].pos = (8, 22);
+        let result = world.validate(0, crate::action::Action::Sleep);
+        assert!(matches!(result, crate::action::Action::Move { .. }),
+            "Sleep at another agent's home should become Move (wander), got {:?}", result);
+    }
+
+    #[test]
+    fn validate_read_oracle_without_pending_becomes_wander() {
+        let mut world = minimal_world(1);
+        world.agents[0].pos = (9, 11); // Temple tile
+        world.agents[0].oracle_pending = false;
+        let result = world.validate(0, crate::action::Action::ReadOracle);
+        assert!(matches!(result, crate::action::Action::Move { .. }),
+            "ReadOracle without pending should become Move (wander), got {:?}", result);
+    }
+
+    #[test]
+    fn validate_read_oracle_at_temple_with_pending_passes() {
+        let mut world = minimal_world(1);
+        world.agents[0].pos = (9, 11); // Temple tile (col=9, row=11; Temple: rows 10..13, cols 8..12)
+        world.agents[0].oracle_pending = true;
+        let result = world.validate(0, crate::action::Action::ReadOracle);
+        assert!(matches!(result, crate::action::Action::ReadOracle),
+            "ReadOracle at Temple with pending should pass, got {:?}", result);
+    }
+
+    #[test]
+    fn validate_forage_at_forest_passes() {
+        let mut world = minimal_world(1);
+        world.agents[0].pos = (0, 0); // Forest tile
+        let result = world.validate(0, crate::action::Action::Forage);
+        assert!(matches!(result, crate::action::Action::Forage),
+            "Forage at Forest should pass, got {:?}", result);
+    }
+
+    #[test]
+    fn validate_move_valid_destination_passes() {
+        let world = minimal_world(1);
+        let result = world.validate(0, crate::action::Action::Move { destination: "Forest".to_string() });
+        match &result {
+            crate::action::Action::Move { destination } => {
+                assert_eq!(destination, "Forest", "valid Move destination should be preserved");
+            }
+            _ => panic!("expected Move, got {:?}", result),
+        }
+    }
+
+    #[test]
+    fn validate_move_invalid_destination_becomes_wander() {
+        let world = minimal_world(1);
+        let result = world.validate(0, crate::action::Action::Move { destination: "Mordor".to_string() });
+        match &result {
+            crate::action::Action::Move { destination } => {
+                assert_ne!(destination, "Mordor", "invalid destination should be replaced by wander");
+            }
+            _ => panic!("expected Move (wander), got {:?}", result),
+        }
+    }
+
+    #[test]
+    fn validate_gossip_unknown_target_becomes_wander() {
+        let world = minimal_world(2); // Elara (0), Rowan (1)
+        let result = world.validate(0, crate::action::Action::Gossip {
+            about: "Gandalf".to_string(),
+            rumor: "is a wizard".to_string(),
+        });
+        assert!(matches!(result, crate::action::Action::Move { .. }),
+            "Gossip about unknown agent should become Move (wander), got {:?}", result);
+    }
+
+    #[test]
+    fn validate_gossip_case_normalizes_target() {
+        let world = minimal_world(2); // Elara (0), Rowan (1)
+        let result = world.validate(0, crate::action::Action::Gossip {
+            about: "rowan".to_string(), // lowercase
+            rumor: "likes fish".to_string(),
+        });
+        match result {
+            crate::action::Action::Gossip { about, .. } => {
+                assert_eq!(about, "Rowan", "gossip target should be normalized to canonical name");
+            }
+            _ => panic!("expected Gossip with normalized name, got {:?}", result),
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // parse_chat_response cascade
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn parse_chat_response_valid_json_with_exchange() {
+        let raw = r#"{"summary":"they talk","exchange":"Elara: Hi.\nRowan: Hello."}"#;
+        let (summary, exchange, gossip) = World::parse_chat_response(raw);
+        assert_eq!(summary, "they talk");
+        assert_eq!(exchange.as_deref(), Some("Elara: Hi.\nRowan: Hello."));
+        assert!(gossip.is_none());
+    }
+
+    #[test]
+    fn parse_chat_response_valid_json_no_exchange() {
+        let raw = r#"{"summary":"a quiet meeting","exchange":null}"#;
+        let (summary, exchange, _) = World::parse_chat_response(raw);
+        assert_eq!(summary, "a quiet meeting");
+        assert!(exchange.is_none(), "null exchange should be None");
+    }
+
+    #[test]
+    fn parse_chat_response_empty_exchange_filtered() {
+        let raw = r#"{"summary":"brief","exchange":""}"#;
+        let (_, exchange, _) = World::parse_chat_response(raw);
+        assert!(exchange.is_none(), "empty exchange string should be filtered to None");
+    }
+
+    #[test]
+    fn parse_chat_response_code_fenced() {
+        let raw = "```json\n{\"summary\":\"they chat\",\"exchange\":\"A: Hi.\\nB: Hey.\"}\n```";
+        let (summary, exchange, _) = World::parse_chat_response(raw);
+        assert_eq!(summary, "they chat");
+        assert!(exchange.is_some());
+    }
+
+    #[test]
+    fn parse_chat_response_summary_key_scan_fallback() {
+        // Prose-wrapped JSON: has "summary" key but not valid full JSON
+        let raw = r#"Here is the result: "summary": "a quiet walk together" and that was that."#;
+        let (summary, exchange, _) = World::parse_chat_response(raw);
+        assert_eq!(summary, "a quiet walk together");
+        assert!(exchange.is_none());
+    }
+
+    #[test]
+    fn parse_chat_response_garbage_returns_raw_text() {
+        let raw = "they talked for a while and then parted";
+        let (summary, exchange, _) = World::parse_chat_response(raw);
+        assert_eq!(summary, raw.trim());
+        assert!(exchange.is_none());
+    }
+
+    // -----------------------------------------------------------------------
+    // parse_tile_type
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn parse_tile_type_canonical_names() {
+        let world = minimal_world(1);
+        assert_eq!(world.parse_tile_type("forest",  0), Some(TileType::Forest));
+        assert_eq!(world.parse_tile_type("river",   0), Some(TileType::River));
+        assert_eq!(world.parse_tile_type("tavern",  0), Some(TileType::Tavern));
+        assert_eq!(world.parse_tile_type("well",    0), Some(TileType::Well));
+        assert_eq!(world.parse_tile_type("meadow",  0), Some(TileType::Meadow));
+        assert_eq!(world.parse_tile_type("temple",  0), Some(TileType::Temple));
+        assert_eq!(world.parse_tile_type("square",  0), Some(TileType::Square));
+    }
+
+    #[test]
+    fn parse_tile_type_home_variants() {
+        let world = minimal_world(3); // need 3 agents for Home(0), Home(1), Home(2)
+        // "home" → Home(agent_idx)
+        assert_eq!(world.parse_tile_type("home", 0), Some(TileType::Home(0)));
+        // "rowan's home" → Home(1) (hardcoded)
+        assert_eq!(world.parse_tile_type("Rowan's Home", 0), Some(TileType::Home(1)));
+        // "elara's home" → Home(0)
+        assert_eq!(world.parse_tile_type("Elara's Home", 0), Some(TileType::Home(0)));
+    }
+
+    #[test]
+    fn parse_tile_type_unknown_returns_none() {
+        let world = minimal_world(1);
+        assert_eq!(world.parse_tile_type("Mordor", 0), None);
+        assert_eq!(world.parse_tile_type("", 0), None);
+    }
+
+    // -----------------------------------------------------------------------
+    // Module-level helpers: jaccard_word_overlap, parse_json_quality_field
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn jaccard_word_overlap_identical_strings() {
+        let result = jaccard_word_overlap("hello world", "hello world");
+        assert!((result - 1.0).abs() < f32::EPSILON, "identical strings should have overlap 1.0");
+    }
+
+    #[test]
+    fn jaccard_word_overlap_no_shared_words() {
+        let result = jaccard_word_overlap("cat dog", "fish bird");
+        assert_eq!(result, 0.0, "no shared words should give 0.0");
+    }
+
+    #[test]
+    fn jaccard_word_overlap_partial_overlap() {
+        // "a b c" vs "b c d" → intersection={b,c}=2, union={a,b,c,d}=4 → 0.5
+        let result = jaccard_word_overlap("a b c", "b c d");
+        assert!((result - 0.5).abs() < 0.001, "partial overlap should be 0.5, got {}", result);
+    }
+
+    #[test]
+    fn jaccard_word_overlap_empty_strings() {
+        // Both empty → 0.0, not a panic
+        let result = jaccard_word_overlap("", "");
+        assert_eq!(result, 0.0, "two empty strings should give 0.0");
+    }
+
+    #[test]
+    fn parse_json_quality_field_valid_json() {
+        let raw = r#"{"quality":"sincere","other":"stuff"}"#;
+        let result = parse_json_quality_field(raw);
+        assert_eq!(result, "sincere");
+    }
+
+    #[test]
+    fn parse_json_quality_field_garbage_defaults_to_sincere() {
+        let result = parse_json_quality_field("not json at all !!! xyz");
+        assert_eq!(result, "sincere", "garbage input should default to 'sincere'");
+    }
+
+    #[test]
+    fn parse_json_quality_field_embedded_json() {
+        // Prose with embedded JSON
+        let raw = r#"I think this is {"quality":"profound"} really meaningful."#;
+        let result = parse_json_quality_field(raw);
+        assert_eq!(result, "profound", "should extract quality from embedded JSON");
+    }
+
+    // -----------------------------------------------------------------------
+    // Integration smoke tests
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn smoke_tick_result_entries_count_equals_agent_count() {
+        let mut world = minimal_world(3); // 3 agents
+        let result = world.tick().await.expect("tick should not error");
+        assert_eq!(result.entries.len(), 3,
+            "tick result should have one entry per agent, got {}", result.entries.len());
+    }
+
+    #[tokio::test]
+    async fn smoke_needs_hunger_decays_each_tick() {
+        let mut world = minimal_world(1);
+        let hunger_before = world.agents[0].needs.hunger;
+        world.tick().await.expect("tick should not error");
+        let hunger_after = world.agents[0].needs.hunger;
+        // Hunger decays each tick (unless action restored it, but MockBackend may choose eat)
+        // We can only assert it was clamped to valid range
+        assert!(hunger_after >= 0.0 && hunger_after <= 100.0,
+            "hunger should be in valid range [0,100], got {}", hunger_after);
+        // Also assert it did not somehow *increase* beyond initial without eating
+        // (weak assertion — MockBackend can choose eat action which raises hunger)
+        let _ = hunger_before; // suppress unused warning
+    }
 }

@@ -531,4 +531,198 @@ mod tests {
         assert!(matches!(action, Action::Eat), "expected Eat, got {:?}", action);
         assert_eq!(reason.as_deref(), Some("hungry"));
     }
+
+    // --- parse_response cascade ---
+
+    #[test]
+    fn parse_response_valid_direct_json() {
+        let raw = r#"{"action":"fish","target":null,"intent":null,"reason":"hungry","description":"I fish at the river"}"#;
+        let (action, reason, desc) = parse_response(raw);
+        assert!(matches!(action, Action::Fish), "expected Fish, got {:?}", action);
+        assert_eq!(reason.as_deref(), Some("hungry"));
+        assert!(desc.is_some());
+    }
+
+    #[test]
+    fn parse_response_code_fenced_json() {
+        let raw = "```json\n{\"action\":\"eat\",\"reason\":\"hungry\",\"description\":\"eating\"}\n```";
+        let (action, _, _) = parse_response(raw);
+        assert!(matches!(action, Action::Eat), "expected Eat, got {:?}", action);
+    }
+
+    #[test]
+    fn parse_response_regex_fallback() {
+        // No valid JSON but has "action": "fish" in prose
+        let raw = r#"I think I should rest. "action": "fish" is what I choose."#;
+        let (action, _, _) = parse_response(raw);
+        assert!(matches!(action, Action::Fish), "expected Fish, got {:?}", action);
+    }
+
+    #[test]
+    fn parse_response_empty_string_becomes_wander() {
+        let (action, _, _) = parse_response("");
+        assert!(matches!(action, Action::Wander), "expected Wander, got {:?}", action);
+    }
+
+    #[test]
+    fn parse_response_garbage_becomes_wander() {
+        let (action, _, _) = parse_response("xyz !! not json at all !!! 123");
+        assert!(matches!(action, Action::Wander), "expected Wander, got {:?}", action);
+    }
+
+    #[test]
+    fn parse_response_null_action_field_becomes_wander() {
+        // {"action":null} — action field is null, not a string → Option<String> is None
+        // try_parse_json returns None (action? short-circuits), no string in extract_action_field
+        let raw = r#"{"action":null,"reason":"confused"}"#;
+        let (action, _, _) = parse_response(raw);
+        assert!(matches!(action, Action::Wander), "expected Wander for null action, got {:?}", action);
+    }
+
+    #[test]
+    fn parse_response_reason_empty_string_filtered() {
+        let raw = r#"{"action":"eat","reason":"","description":"eating"}"#;
+        let (_, reason, _) = parse_response(raw);
+        assert!(reason.is_none(), "empty reason should be filtered to None");
+    }
+
+    // --- action_from_name edge cases ---
+
+    #[test]
+    fn action_from_name_case_insensitive() {
+        let a = action_from_name("EAT", None, None);
+        assert!(matches!(a, Action::Eat), "EAT should map to Eat");
+        let b = action_from_name("CAST_INTENT", None, Some("test intent"));
+        assert!(matches!(b, Action::CastIntent { .. }), "CAST_INTENT should map to CastIntent");
+    }
+
+    #[test]
+    fn action_from_name_chat_empty_target_allowed() {
+        let a = action_from_name("chat", None, None);
+        match a {
+            Action::Chat { target_name } => assert!(target_name.is_empty(), "no target → empty string"),
+            _ => panic!("expected Chat, got {:?}", a),
+        }
+    }
+
+    #[test]
+    fn action_from_name_move_no_target_defaults_village_square() {
+        let a = action_from_name("move", None, None);
+        match a {
+            Action::Move { destination } => assert_eq!(destination, "Village Square"),
+            _ => panic!("expected Move, got {:?}", a),
+        }
+    }
+
+    #[test]
+    fn action_from_name_gossip_empty_target_becomes_wander() {
+        let a = action_from_name("gossip", None, Some("some rumor"));
+        assert!(matches!(a, Action::Wander), "gossip with no target should Wander");
+    }
+
+    #[test]
+    fn action_from_name_teach_empty_target_becomes_wander() {
+        let a = action_from_name("teach", None, Some("some lesson"));
+        assert!(matches!(a, Action::Wander), "teach with no target should Wander");
+    }
+
+    #[test]
+    fn action_from_name_admire_empty_target_becomes_wander() {
+        let a = action_from_name("admire", None, None);
+        assert!(matches!(a, Action::Wander), "admire with no target should Wander");
+    }
+
+    #[test]
+    fn action_from_name_cast_intent_empty_intent_uses_default() {
+        let a = action_from_name("cast_intent", None, Some(""));
+        match a {
+            Action::CastIntent { intent } => {
+                assert!(!intent.is_empty(), "empty intent should use hardcoded default");
+                assert_eq!(intent, "I seek something I cannot quite name");
+            }
+            _ => panic!("expected CastIntent, got {:?}", a),
+        }
+    }
+
+    #[test]
+    fn action_from_name_unknown_becomes_wander() {
+        let a = action_from_name("fly_through_the_sky", None, None);
+        assert!(matches!(a, Action::Wander), "unknown action should Wander");
+    }
+
+    // --- d20 math ---
+
+    #[test]
+    fn resolve_auto_success_dc_zero() {
+        use rand::SeedableRng;
+        use rand::rngs::StdRng;
+        use crate::agent::{Attributes, Needs};
+        let config = crate::config::load("config/world.toml").expect("config should load");
+        let attrs = Attributes { vigor: 6, wit: 6, grace: 6, heart: 6, numen: 6 };
+        let needs = Needs { hunger: 70.0, energy: 70.0, fun: 70.0, social: 70.0, hygiene: 70.0 };
+        let mut rng = StdRng::seed_from_u64(0);
+        let res = resolve(&Action::Rest, &attrs, &needs, &config, false, 0, &mut rng, 0);
+        assert_eq!(res.tier, OutcomeTier::Success, "Rest should auto-succeed");
+        assert_eq!(res.roll, 0, "auto-success has roll=0");
+        assert_eq!(res.dc, 0, "auto-success has dc=0");
+    }
+
+    #[test]
+    fn resolve_night_dc_bonus_applies() {
+        use rand::SeedableRng;
+        use rand::rngs::StdRng;
+        use crate::agent::{Attributes, Needs};
+        let config = crate::config::load("config/world.toml").expect("config should load");
+        let attrs = Attributes { vigor: 6, wit: 6, grace: 6, heart: 6, numen: 6 };
+        let needs = Needs { hunger: 70.0, energy: 70.0, fun: 70.0, social: 70.0, hygiene: 70.0 };
+        let mut rng_day   = StdRng::seed_from_u64(99);
+        let mut rng_night = StdRng::seed_from_u64(99);
+        let res_day   = resolve(&Action::Forage, &attrs, &needs, &config, false, 0, &mut rng_day,   0);
+        let res_night = resolve(&Action::Forage, &attrs, &needs, &config, true,  0, &mut rng_night, 0);
+        assert!(res_night.dc > res_day.dc,
+            "night DC ({}) should exceed day DC ({})", res_night.dc, res_day.dc);
+    }
+
+    #[test]
+    fn need_changes_scale_multiplier_zero_gives_zero() {
+        use crate::agent::NeedChanges;
+        let nc = NeedChanges { hunger: Some(20.0), energy: Some(-5.0), fun: None, social: None, hygiene: None };
+        let scaled = nc.scale(0.0);
+        assert_eq!(scaled.hunger, Some(0.0), "scaled hunger should be 0");
+        assert_eq!(scaled.energy, Some(0.0), "scaled energy should be 0");
+        assert!(scaled.fun.is_none(), "None fields remain None");
+    }
+
+    #[test]
+    fn need_changes_scale_multiplier_1_5() {
+        use crate::agent::NeedChanges;
+        let nc = NeedChanges { hunger: Some(20.0), energy: None, fun: None, social: None, hygiene: None };
+        let scaled = nc.scale(1.5);
+        let h = scaled.hunger.expect("hunger should be Some after scaling");
+        assert!((h - 30.0).abs() < 0.001, "20.0 * 1.5 should be 30.0, got {}", h);
+    }
+
+    // --- Attributes::modifier ---
+
+    #[test]
+    fn modifier_score_5_gives_zero() {
+        use crate::agent::Attributes;
+        let attrs = Attributes { vigor: 5, wit: 6, grace: 6, heart: 6, numen: 6 };
+        assert_eq!(attrs.modifier("vigor"), 0, "score 5 → modifier 0");
+    }
+
+    #[test]
+    fn modifier_score_10_gives_plus_five() {
+        use crate::agent::Attributes;
+        let attrs = Attributes { vigor: 10, wit: 6, grace: 6, heart: 6, numen: 6 };
+        assert_eq!(attrs.modifier("vigor"), 5, "score 10 → modifier +5");
+    }
+
+    #[test]
+    fn modifier_unknown_attr_defaults_to_5() {
+        use crate::agent::Attributes;
+        let attrs = Attributes { vigor: 10, wit: 10, grace: 10, heart: 10, numen: 10 };
+        // Unknown attr defaults to score 5 → modifier = 5 - 5 = 0
+        assert_eq!(attrs.modifier("arcane"), 0, "unknown attr defaults to score 5 → modifier 0");
+    }
 }

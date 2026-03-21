@@ -1030,3 +1030,80 @@ impl LlmBackend for MockBackend {
         Ok(response)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use rand::SeedableRng;
+
+    // -----------------------------------------------------------------------
+    // MockBackend round-trip validity
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn mock_backend_action_responses_all_parseable() {
+        // Call mock_actions many times (covers all 35 variants via RNG cycling)
+        // and verify none produce Wander via the fallback path
+        let mut rng = StdRng::seed_from_u64(42);
+        let mut wander_count = 0;
+        let total = 200;
+        for _ in 0..total {
+            let s = mock_actions(&mut rng);
+            let (action, _, _) = crate::action::parse_response(s);
+            // The mock never produces "wander" as an action name, so any Wander
+            // result means the cascading parser failed — that's a bug
+            if matches!(action, crate::action::Action::Wander) {
+                wander_count += 1;
+                eprintln!("Unexpected Wander for: {}", s);
+            }
+        }
+        assert_eq!(wander_count, 0,
+            "{}/{} mock action responses produced unexpected Wander (parser fallback)", wander_count, total);
+    }
+
+    #[test]
+    fn mock_backend_interpreter_responses_all_parseable() {
+        for (i, s) in MOCK_INTERPRETER_RESPONSES.iter().enumerate() {
+            let result = crate::magic::parse_interpreter_response(s);
+            assert!(result.is_some(),
+                "MOCK_INTERPRETER_RESPONSES[{}] failed to parse: {}", i, s);
+            let ii = result.unwrap();
+            assert!(!ii.primary_effect.is_empty(),
+                "primary_effect should not be empty in response {}", i);
+        }
+    }
+
+    #[test]
+    fn mock_backend_chat_summaries_all_parseable() {
+        // Each chat summary should be valid JSON with a non-empty "summary" field
+        for (i, s) in MOCK_CHAT_SUMMARIES.iter().enumerate() {
+            let v: serde_json::Value = serde_json::from_str(s)
+                .expect(&format!("MOCK_CHAT_SUMMARIES[{}] should be valid JSON: {}", i, s));
+            let summary = v.get("summary").and_then(|s| s.as_str()).unwrap_or("");
+            assert!(!summary.is_empty(),
+                "MOCK_CHAT_SUMMARIES[{}] should have non-empty summary", i);
+        }
+    }
+
+    #[test]
+    fn mock_backend_haiku_responses_have_all_fields() {
+        #[derive(serde::Deserialize)]
+        #[allow(dead_code)]
+        struct HaikuResponse {
+            sincerity: u32,
+            imagery:   u32,
+            syllables: u32,
+            verdict:   String,
+        }
+        for (i, s) in MOCK_HAIKU_RESPONSES.iter().enumerate() {
+            let result: std::result::Result<HaikuResponse, _> = serde_json::from_str(s);
+            assert!(result.is_ok(),
+                "MOCK_HAIKU_RESPONSES[{}] failed to parse: {}", i, s);
+            let h = result.unwrap();
+            assert!(!h.verdict.is_empty(),
+                "verdict should not be empty in haiku response {}", i);
+            assert!(h.sincerity > 0 && h.sincerity <= 5,
+                "sincerity {} out of range [1,5] in response {}", h.sincerity, i);
+        }
+    }
+}
