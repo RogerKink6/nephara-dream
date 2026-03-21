@@ -10,6 +10,17 @@ use tracing::{debug, info, warn};
 pub type Result<T> = std::result::Result<T, Box<dyn std::error::Error + Send + Sync>>;
 
 // ---------------------------------------------------------------------------
+// Output sanitizer — applied to all backend responses before returning
+// ---------------------------------------------------------------------------
+
+fn sanitize_llm_output(raw: String) -> String {
+    raw.replace('\0', "")
+        .chars()
+        .map(|c| if c.is_control() && c != '\n' && c != '\r' && c != '\t' { ' ' } else { c })
+        .collect()
+}
+
+// ---------------------------------------------------------------------------
 // Trait
 // ---------------------------------------------------------------------------
 
@@ -243,6 +254,7 @@ impl LlmBackend for OllamaBackend {
             }
         }
 
+        let content = sanitize_llm_output(content);
         debug!(target: "llm", chars = content.len(), thinking_chars = thinking_chars,
                response = %content, "LLM response");
         Ok(content)
@@ -478,6 +490,7 @@ impl LlmBackend for OpenAICompatBackend {
             }
         }
 
+        let content = sanitize_llm_output(content);
         debug!(target: "llm", chars = content.len(), thinking_chars = thinking_chars,
                response = %content, "LLM response (OpenAI-compat)");
         Ok(content)
@@ -575,6 +588,7 @@ impl LlmBackend for ClaudeBackend {
             .next()
             .ok_or("No text content in Claude response")?;
 
+        let text = sanitize_llm_output(text);
         debug!(target: "llm", chars = text.len(), response = %text, "Claude response");
         Ok(text)
     }
@@ -632,7 +646,7 @@ impl LlmBackend for ClaudeCliBackend {
 
         let text = String::from_utf8(output.stdout)
             .map_err(|e| format!("Claude CLI output UTF-8 error: {}", e))?;
-        let text = text.trim().to_string();
+        let text = sanitize_llm_output(text.trim().to_string());
 
         debug!(target: "llm", chars = text.len(), response = %text, "Claude CLI response");
         Ok(text)
@@ -739,7 +753,7 @@ impl LlmBackend for LlmCliBackend {
 
         let text = String::from_utf8(output.stdout)
             .map_err(|e| format!("llm CLI output UTF-8 error: {}", e))?;
-        let text = text.trim().to_string();
+        let text = sanitize_llm_output(text.trim().to_string());
 
         debug!(target: "llm", chars = text.len(), response = %text, "llm CLI response");
         Ok(text)
@@ -873,6 +887,55 @@ impl LlmBackend for MockBackend {
         let mut rng = self.rng.lock().expect("mock rng poisoned");
 
         // Detect prompt type by content — order matters (most specific first)
+
+        // Batch planning/reflection/desires prompts (must check BEFORE individual checks)
+        if prompt.contains("Reply with JSON only:\n{\"agents\":") {
+            let names: Vec<&str> = prompt.lines()
+                .filter(|line| line.starts_with("=== ") && line.ends_with(" ==="))
+                .map(|line| &line[4..line.len() - 4])
+                .collect();
+
+            if !names.is_empty() {
+                let is_morning    = prompt.contains("morning intention");
+                let is_reflection = prompt.contains("ongoing life story");
+
+                let entries: Vec<String> = names.iter().map(|name| {
+                    let text = if is_morning {
+                        let choices = [
+                            "I intend to forage and rest by the river today.",
+                            "Today I will seek company and perhaps cook a proper meal.",
+                            "I mean to explore the forest and clear my head.",
+                            "I want to practice fishing and spend time alone.",
+                            "Today I'll rest and tend to myself.",
+                        ];
+                        choices[rng.gen_range(0..choices.len())]
+                    } else if is_reflection {
+                        let choices = [
+                            "I wandered and foraged, finding small comforts in familiar places. The day passed quietly, as many do.",
+                            "I spent time near the river, fishing without much luck. The stillness was welcome nonetheless.",
+                            "I sought company today and found it briefly. The conversation lifted something in me.",
+                            "I pushed myself too hard and felt it by evening. Rest came as a relief.",
+                            "Today held small magic — I spoke a wish aloud and felt the world shift slightly.",
+                        ];
+                        choices[rng.gen_range(0..choices.len())]
+                    } else {
+                        let choices = [
+                            "I keep thinking about the forest and how it holds its secrets. I want more time there.",
+                            "I want to understand magic better. The world could be more forthcoming about such things.",
+                            "Today I found myself wishing for better company and more chances to connect.",
+                            "I want the river to run cleaner and the food to be more plentiful.",
+                            "I have been thinking about what I am here for. I would like a little more time to find out.",
+                        ];
+                        choices[rng.gen_range(0..choices.len())]
+                    };
+                    let text_safe = text.replace('"', "'");
+                    format!(r#"{{"name":"{}","text":"{}"}}"#, name, text_safe)
+                }).collect();
+
+                return Ok(format!(r#"{{"agents":[{}]}}"#, entries.join(",")));
+            }
+        }
+
         if prompt.contains("This chapter of your life is ending") {
             let choices = [
                 "I wish I had spent more time at the river — just sitting, not fishing, not thinking. I want the world to be quieter, slower. Less urgency and more willingness to simply be.",

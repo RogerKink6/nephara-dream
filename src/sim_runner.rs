@@ -32,15 +32,16 @@ fn extract_prayer_text(action_line: &str) -> Option<String> {
 // ---------------------------------------------------------------------------
 
 pub async fn run_simulation(
-    tx:             mpsc::Sender<TuiEvent>,
-    mut world:      World,
-    total_ticks:    u32,
-    seed:           u64,
-    backend_name:   String,
-    souls_dir:      String,
-    paused:         Arc<AtomicBool>,
-    tick_delay_ms:  Arc<AtomicU64>,
-    god_queue:      Arc<Mutex<VecDeque<GodMessage>>>,
+    tx:                   mpsc::Sender<TuiEvent>,
+    mut world:            World,
+    total_ticks:          u32,
+    seed:                 u64,
+    backend_name:         String,
+    souls_dir:            String,
+    paused:               Arc<AtomicBool>,
+    tick_delay_ms:        Arc<AtomicU64>,
+    god_queue:            Arc<Mutex<VecDeque<GodMessage>>>,
+    switch_to_streaming:  Arc<AtomicBool>,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     // Banner to file
     world.run_log.write_line(&format!(
@@ -62,10 +63,21 @@ pub async fn run_simulation(
     let _ = tx.send(TuiEvent::MapUpdate(world.render_map_cells())).await;
     let _ = tx.send(TuiEvent::NeedsUpdate(world.agent_needs_snapshots())).await;
 
-    for _t in 0..total_ticks {
+    // -----------------------------------------------------------------------
+    // Tick loop — break on error; cleanup always runs below
+    // -----------------------------------------------------------------------
+
+    let mut tick_error: Option<String> = None;
+
+    'tick_loop: for _t in 0..total_ticks {
         // Pause loop
         while paused.load(Ordering::Relaxed) {
             tokio::time::sleep(Duration::from_millis(16)).await;
+        }
+
+        // Switch to streaming mode if requested by TUI
+        if switch_to_streaming.load(Ordering::Relaxed) {
+            world.run_log.tui_mode = false;
         }
 
         let tick_num = world.tick_num;
@@ -85,7 +97,15 @@ pub async fn run_simulation(
             }
         }
 
-        let result = world.tick().await?;
+        let result = match world.tick().await {
+            Ok(r) => r,
+            Err(e) => {
+                warn!("Tick failed: {}", e);
+                let _ = tx.send(TuiEvent::SimulationError(e.to_string())).await;
+                tick_error = Some(e.to_string());
+                break 'tick_loop;
+            }
+        };
 
         // Send day-boundary events first
         for ev in &result.day_events {
@@ -178,6 +198,10 @@ pub async fn run_simulation(
         }
     }
 
+    // -----------------------------------------------------------------------
+    // Cleanup — always runs regardless of tick_error
+    // -----------------------------------------------------------------------
+
     // Final state dump
     runlog::write_state_dump(&world.run_log.run_id, &world.agents, seed);
 
@@ -250,12 +274,14 @@ pub async fn run_simulation(
         &llm_url,
     );
 
-    // Send completion event
-    let _ = tx.send(TuiEvent::SimulationComplete {
-        total_ticks,
-        magic_count:    world.magic_count,
-        notable_events: all_notable,
-    }).await;
+    // Send completion event only if no error (SimulationError already sent in loop)
+    if tick_error.is_none() {
+        let _ = tx.send(TuiEvent::SimulationComplete {
+            total_ticks,
+            magic_count:    world.magic_count,
+            notable_events: all_notable,
+        }).await;
+    }
 
     Ok(())
 }

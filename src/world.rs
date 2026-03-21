@@ -268,6 +268,8 @@ pub struct World {
     pub active_event:        Option<ActiveWorldEvent>,
     /// Pending god messages to inject into prompts this tick.
     pub pending_god_messages: Vec<crate::tui_event::GodMessage>,
+    /// Prayer evaluations pending batch processing this tick.
+    pub pending_prayer_evals: Vec<(usize, String)>,
     /// When true (--no-tui mode), stream LLM action tokens to stdout.
     pub token_echo:          bool,
     /// When Some (TUI mode), send PartialToken events to the TUI.
@@ -327,6 +329,7 @@ impl World {
             pending_llm_calls:  Vec::new(),
             active_event: None,
             pending_god_messages: Vec::new(),
+            pending_prayer_evals: Vec::new(),
             token_echo: false,
             tui_tx: None,
             grid,
@@ -597,16 +600,10 @@ impl World {
                     agent.praise_ticks_remaining = 0;
                 }
 
-                for idx in 0..self.agents.len() {
-                    self.end_of_day_reflection(idx, prev_day).await?;
-                }
-                for idx in 0..self.agents.len() {
-                    self.end_of_day_desires(idx, prev_day).await?;
-                }
+                self.end_of_day_reflection_all(prev_day).await?;
+                self.end_of_day_desires_all(prev_day).await?;
             }
-            for idx in 0..self.agents.len() {
-                self.morning_planning(idx, day).await?;
-            }
+            self.morning_planning_all(day).await?;
             for flag in &mut self.magic_cast_this_day { *flag = false; }
         }
 
@@ -621,6 +618,12 @@ impl World {
         for &idx in &order {
             let entry = self.process_agent(idx, tick, day, is_night, tod).await?;
             entries.push(entry);
+        }
+
+        // Batch evaluate prayers queued this tick
+        if !self.pending_prayer_evals.is_empty() {
+            let evals = std::mem::take(&mut self.pending_prayer_evals);
+            self.batch_evaluate_prayers(&evals).await;
         }
 
         // Passive need decay and praise cooldown countdown
@@ -1629,10 +1632,9 @@ impl World {
             runlog::append_chronicle(&self.souls_dir, &self.agents[idx].identity.name, &run_id, day, tick, tod, "prayer", prayer);
         }
 
-        // Evaluate prayer quality and apply variable rewards
+        // Queue prayer evaluation for batch processing
         if !self.is_test_run {
-            let prayer_owned = prayer.to_string();
-            self.evaluate_prayer(idx, &prayer_owned, day).await;
+            self.pending_prayer_evals.push((idx, prayer.to_string()));
         }
 
         let prayer_short = &prayer[..prayer.len().min(60)];
@@ -1708,11 +1710,7 @@ impl World {
         self.llm_call_counter += 1;
         let llm           = Arc::clone(&self.llm_smart);
         let oracle_tokens = self.config.llm.oracle_max_tokens;
-        let reaction      = llm.generate(&prompt, oracle_tokens, call_seed, None, None).await
-            .unwrap_or_else(|e| {
-                warn!("Oracle LLM error for {}: {}", name, e);
-                format!("{} stands in silent awe.", name)
-            });
+        let reaction      = llm.generate(&prompt, oracle_tokens, call_seed, None, None).await?;
         let reaction = reaction.trim().to_string();
         self.log_llm_call("oracle", &name, &prompt, &reaction);
 
@@ -2041,46 +2039,6 @@ impl World {
     // -----------------------------------------------------------------------
     // Prayer & admiration quality evaluation
     // -----------------------------------------------------------------------
-
-    async fn evaluate_prayer(&mut self, idx: usize, prayer: &str, _day: u32) {
-        let god_name = self.config.world.god_name.clone();
-        let name     = self.agents[idx].name().to_string();
-        let prompt   = format!(
-            "You are evaluating a prayer addressed to {god_name}.\n\
-             Agent: {name}\n\
-             Prayer: \"{prayer}\"\n\n\
-             Score sincerity and depth. Reply with JSON only:\n\
-             {{\"score\": 1-5, \"quality\": \"hollow|sincere|heartfelt|transcendent\"}}",
-        );
-        let call_seed = Some(self.seed.wrapping_add(self.llm_call_counter));
-        self.llm_call_counter += 1;
-        let llm = Arc::clone(&self.llm);
-        let raw = llm.generate(&prompt, 64, call_seed, None, None).await.unwrap_or_default();
-        self.log_llm_call("prayer_eval", &name, &prompt, &raw);
-
-        let quality   = parse_json_quality_field(&raw);
-        let dp_cfg    = self.config.needs.daily_praise.clone();
-        let (mult, dev_gain): (f32, f32) = match quality.as_str() {
-            "transcendent" => (2.5, dp_cfg.devotion_gain_transcendent),
-            "heartfelt"    => (1.5, dp_cfg.devotion_gain_heartfelt),
-            "sincere"      => (1.0, dp_cfg.devotion_gain_sincere),
-            _              => (0.3, 0.0), // hollow
-        };
-
-        let base           = 8.0f32;
-        let jitter_fun:    f32 = self.rng.gen_range(-3.0_f32..3.0_f32);
-        let jitter_social: f32 = self.rng.gen_range(-2.0_f32..2.0_f32);
-
-        let changes = crate::agent::NeedChanges {
-            fun:     Some((base * mult + jitter_fun).max(0.0)),
-            social:  Some((base * mult * 0.8 + jitter_social).max(0.0)),
-            hygiene: Some(base * 0.5 * mult),
-            energy:  if quality == "transcendent" { Some(10.0) } else { None },
-            ..Default::default()
-        };
-        self.agents[idx].needs.apply(&changes);
-        self.agents[idx].devotion = (self.agents[idx].devotion + dev_gain).clamp(0.0, 100.0);
-    }
 
     async fn evaluate_admiration(&mut self, admirer_idx: usize, admired_idx: usize, admired_name: &str, day: u32) {
         let admirer_name = self.agents[admirer_idx].name().to_string();
@@ -2469,11 +2427,7 @@ Choose ONE action. Respond with ONLY a JSON object:
         self.llm_call_counter += 1;
         let llm        = Arc::clone(&self.llm_smart);
         let max_tokens = self.config.llm.planning_max_tokens;
-        let response   = llm.generate(&prompt, max_tokens, call_seed, None, None).await
-            .unwrap_or_else(|e| {
-                warn!("Planning LLM error for {}: {}", self.agents[idx].name(), e);
-                String::new()
-            });
+        let response   = llm.generate(&prompt, max_tokens, call_seed, None, None).await?;
         let plan_agent_name = self.agents[idx].name().to_string();
         self.log_llm_call("planning", &plan_agent_name, &prompt, &response);
         let trimmed = response.trim().to_string();
@@ -2505,11 +2459,7 @@ Choose ONE action. Respond with ONLY a JSON object:
         self.llm_call_counter += 1;
         let llm        = Arc::clone(&self.llm_smart);
         let max_tokens = self.config.llm.reflection_max_tokens;
-        let response   = llm.generate(&prompt, max_tokens, call_seed, None, None).await
-            .unwrap_or_else(|e| {
-                warn!("Reflection LLM error for {}: {}", self.agents[idx].name(), e);
-                String::new()
-            });
+        let response   = llm.generate(&prompt, max_tokens, call_seed, None, None).await?;
         let reflect_agent_name = self.agents[idx].name().to_string();
         self.log_llm_call("reflection", &reflect_agent_name, &prompt, &response);
         let trimmed = response.trim().to_string();
@@ -2546,11 +2496,7 @@ Choose ONE action. Respond with ONLY a JSON object:
         self.llm_call_counter += 1;
         let llm        = Arc::clone(&self.llm_smart);
         let max_tokens = self.config.llm.desires_max_tokens;
-        let response   = llm.generate(&prompt, max_tokens, call_seed, None, None).await
-            .unwrap_or_else(|e| {
-                warn!("Desires LLM error for {}: {}", self.agents[idx].name(), e);
-                String::new()
-            });
+        let response   = llm.generate(&prompt, max_tokens, call_seed, None, None).await?;
         let desires_agent_name = self.agents[idx].name().to_string();
         self.log_llm_call("desires", &desires_agent_name, &prompt, &response);
         let trimmed = response.trim().to_string();
@@ -2605,6 +2551,348 @@ Choose ONE action. Respond with ONLY a JSON object:
             }
         }
         Ok(())
+    }
+
+    // -----------------------------------------------------------------------
+    // Batch LLM helpers
+    // -----------------------------------------------------------------------
+
+    /// Parse `{"agents":[{"name":"...","text":"..."},...]}` from raw LLM output.
+    fn parse_batch_response(raw: &str) -> Vec<(String, String)> {
+        let v: serde_json::Value = serde_json::from_str(raw.trim())
+            .or_else(|_| {
+                if let Some(s) = raw.find('{') {
+                    if let Some(e) = raw.rfind('}') {
+                        return serde_json::from_str(&raw[s..=e]);
+                    }
+                }
+                Err(serde_json::Error::io(std::io::Error::new(std::io::ErrorKind::Other, "no json")))
+            })
+            .unwrap_or(serde_json::Value::Null);
+
+        v.get("agents")
+            .and_then(|a| a.as_array())
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|item| {
+                        let name = item.get("name")?.as_str()?.to_string();
+                        let text = item.get("text")?.as_str()?.to_string();
+                        if name.is_empty() || text.is_empty() { return None; }
+                        Some((name, text))
+                    })
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    async fn morning_planning_all(
+        &mut self,
+        day: u32,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let n = self.agents.len();
+        if n == 0 { return Ok(()); }
+
+        let agent_names: Vec<String> = self.agents.iter().map(|a| a.name().to_string()).collect();
+        let mut prompt = format!(
+            "Write a one-to-two sentence morning intention for each of the {} characters below. \
+             Speak in their own voice.\n\n",
+            n
+        );
+        for idx in 0..n {
+            let body = self.build_intentions_prompt(idx, day);
+            prompt.push_str(&format!("=== {} ===\n{}\n\n", agent_names[idx], body));
+        }
+        prompt.push_str("Reply with JSON only:\n{\"agents\":[{\"name\":\"...\",\"text\":\"...\"},...]}");
+
+        let call_seed  = Some(self.seed.wrapping_add(self.llm_call_counter));
+        self.llm_call_counter += 1;
+        let llm        = Arc::clone(&self.llm_smart);
+        let max_tokens = self.config.llm.planning_max_tokens * n as u32;
+
+        let response = match llm.generate(&prompt, max_tokens, call_seed, None, None).await {
+            Ok(r) => r,
+            Err(e) => {
+                warn!("Batch morning planning failed: {} — falling back to sequential", e);
+                for idx in 0..n {
+                    self.morning_planning(idx, day).await?;
+                }
+                return Ok(());
+            }
+        };
+        self.log_llm_call("planning_batch", "all", &prompt, &response);
+
+        let parsed = Self::parse_batch_response(&response);
+        // Fall back to sequential for any missing agents
+        let found_names: std::collections::HashSet<String> = parsed.iter().map(|(n, _)| n.clone()).collect();
+        let missing: Vec<usize> = (0..n).filter(|&i| !found_names.contains(&agent_names[i])).collect();
+        if !missing.is_empty() {
+            warn!("Batch morning planning: {}/{} agents parsed — sequential fallback for rest", parsed.len(), n);
+            for idx in missing {
+                self.morning_planning(idx, day).await?;
+            }
+        }
+
+        for (name, text) in parsed {
+            if let Some(idx) = self.agents.iter().position(|a| a.name() == name) {
+                let trimmed = text.trim().to_string();
+                if !trimmed.is_empty() {
+                    self.agents[idx].daily_intentions = Some(trimmed.clone());
+                    let agent_name = self.agents[idx].name().to_string();
+                    let run_id     = self.run_log.run_id.clone();
+                    runlog::log_introspection(&run_id, &agent_name, day, "Morning Planning", &trimmed);
+                    self.pending_day_events.push(DayEvent {
+                        kind:       DayEventKind::MorningIntention,
+                        agent_id:   idx,
+                        agent_name,
+                        day,
+                        text:       trimmed,
+                    });
+                }
+            }
+        }
+        Ok(())
+    }
+
+    async fn end_of_day_reflection_all(
+        &mut self,
+        day: u32,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let n = self.agents.len();
+        if n == 0 { return Ok(()); }
+
+        let agent_names: Vec<String> = self.agents.iter().map(|a| a.name().to_string()).collect();
+        let mut prompt = format!(
+            "Update the ongoing life story for each of the {} characters below. \
+             2-3 sentences each, first person, specific to today's events.\n\n",
+            n
+        );
+        for idx in 0..n {
+            let body = self.build_reflection_prompt(idx, day);
+            prompt.push_str(&format!("=== {} ===\n{}\n\n", agent_names[idx], body));
+        }
+        prompt.push_str("Reply with JSON only:\n{\"agents\":[{\"name\":\"...\",\"text\":\"...\"},...]}");
+
+        let call_seed  = Some(self.seed.wrapping_add(self.llm_call_counter));
+        self.llm_call_counter += 1;
+        let llm        = Arc::clone(&self.llm_smart);
+        let max_tokens = self.config.llm.reflection_max_tokens * n as u32;
+
+        let response = match llm.generate(&prompt, max_tokens, call_seed, None, None).await {
+            Ok(r) => r,
+            Err(e) => {
+                warn!("Batch reflection failed: {} — falling back to sequential", e);
+                for idx in 0..n {
+                    self.end_of_day_reflection(idx, day).await?;
+                }
+                return Ok(());
+            }
+        };
+        self.log_llm_call("reflection_batch", "all", &prompt, &response);
+
+        let parsed = Self::parse_batch_response(&response);
+        let found_names: std::collections::HashSet<String> = parsed.iter().map(|(n, _)| n.clone()).collect();
+        let missing: Vec<usize> = (0..n).filter(|&i| !found_names.contains(&agent_names[i])).collect();
+        if !missing.is_empty() {
+            warn!("Batch reflection: {}/{} agents parsed — sequential fallback for rest", parsed.len(), n);
+            for idx in missing {
+                self.end_of_day_reflection(idx, day).await?;
+            }
+        }
+
+        let tick  = self.tick_num;
+        let tod   = runlog::time_of_day(tick % self.config.time.ticks_per_day, self.config.time.night_start_tick);
+        for (name, text) in parsed {
+            if let Some(idx) = self.agents.iter().position(|a| a.name() == name) {
+                let trimmed = text.trim().to_string();
+                if !trimmed.is_empty() {
+                    self.agents[idx].life_story = trimmed.clone();
+                    let agent_name = self.agents[idx].name().to_string();
+                    let souls_dir  = self.souls_dir.clone();
+                    let run_id     = self.run_log.run_id.clone();
+                    if !self.is_test_run {
+                        runlog::append_chronicle(&souls_dir, &agent_name, &run_id, day, tick, tod, "journal", &trimmed);
+                    }
+                    runlog::log_introspection(&run_id, &agent_name, day, "End-of-Day Reflection", &trimmed);
+                    self.pending_day_events.push(DayEvent {
+                        kind:       DayEventKind::EveningReflection,
+                        agent_id:   idx,
+                        agent_name,
+                        day,
+                        text:       trimmed,
+                    });
+                }
+            }
+        }
+        Ok(())
+    }
+
+    async fn end_of_day_desires_all(
+        &mut self,
+        day: u32,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let n = self.agents.len();
+        if n == 0 { return Ok(()); }
+
+        let agent_names: Vec<String> = self.agents.iter().map(|a| a.name().to_string()).collect();
+        let mut prompt = format!(
+            "Write end-of-day thoughts and desires for each of the {} characters below. \
+             2-3 sentences each, in their own voice.\n\n",
+            n
+        );
+        for idx in 0..n {
+            let body = self.build_desires_prompt(idx, day);
+            prompt.push_str(&format!("=== {} ===\n{}\n\n", agent_names[idx], body));
+        }
+        prompt.push_str("Reply with JSON only:\n{\"agents\":[{\"name\":\"...\",\"text\":\"...\"},...]}");
+
+        let call_seed  = Some(self.seed.wrapping_add(self.llm_call_counter));
+        self.llm_call_counter += 1;
+        let llm        = Arc::clone(&self.llm_smart);
+        let max_tokens = self.config.llm.desires_max_tokens * n as u32;
+
+        let response = match llm.generate(&prompt, max_tokens, call_seed, None, None).await {
+            Ok(r) => r,
+            Err(e) => {
+                warn!("Batch desires failed: {} — falling back to sequential", e);
+                for idx in 0..n {
+                    self.end_of_day_desires(idx, day).await?;
+                }
+                return Ok(());
+            }
+        };
+        self.log_llm_call("desires_batch", "all", &prompt, &response);
+
+        let parsed = Self::parse_batch_response(&response);
+        let found_names: std::collections::HashSet<String> = parsed.iter().map(|(n, _)| n.clone()).collect();
+        let missing: Vec<usize> = (0..n).filter(|&i| !found_names.contains(&agent_names[i])).collect();
+        if !missing.is_empty() {
+            warn!("Batch desires: {}/{} agents parsed — sequential fallback for rest", parsed.len(), n);
+            for idx in missing {
+                self.end_of_day_desires(idx, day).await?;
+            }
+        }
+
+        let tick = self.tick_num;
+        for (name, text) in parsed {
+            if let Some(idx) = self.agents.iter().position(|a| a.name() == name) {
+                let trimmed = text.trim().to_string();
+                if !trimmed.is_empty() {
+                    self.agents[idx].desires = Some(trimmed.clone());
+                    let agent_name = self.agents[idx].name().to_string();
+                    let souls_dir  = self.souls_dir.clone();
+                    let run_id     = self.run_log.run_id.clone();
+                    if !self.is_test_run {
+                        let tod = runlog::time_of_day(tick % self.config.time.ticks_per_day, self.config.time.night_start_tick);
+                        runlog::append_chronicle(&souls_dir, &agent_name, &run_id, day, tick, tod, "wishes", &trimmed);
+                    }
+                    runlog::log_introspection(&run_id, &agent_name, day, "End-of-Day Desires", &trimmed);
+                    self.pending_day_events.push(DayEvent {
+                        kind:       DayEventKind::EveningDesire,
+                        agent_id:   idx,
+                        agent_name,
+                        day,
+                        text:       trimmed,
+                    });
+                }
+            }
+        }
+        Ok(())
+    }
+
+    async fn batch_evaluate_prayers(&mut self, evals: &[(usize, String)]) {
+        if evals.is_empty() { return; }
+
+        let god_name = self.config.world.god_name.clone();
+        let n = evals.len();
+
+        let mut prompt = format!(
+            "Evaluate these {} prayers addressed to {}.\n\
+             For each, score sincerity and depth.\n\n",
+            n, god_name
+        );
+        for (idx, prayer) in evals {
+            let name = self.agents[*idx].name();
+            prompt.push_str(&format!("Agent: {}\nPrayer: \"{}\"\n\n", name, prayer));
+        }
+        prompt.push_str("Reply with JSON only:\n{\"prayers\":[{\"agent\":\"...\",\"score\":1-5,\"quality\":\"hollow|sincere|heartfelt|transcendent\"},...]}");
+
+        let call_seed = Some(self.seed.wrapping_add(self.llm_call_counter));
+        self.llm_call_counter += 1;
+        let llm = Arc::clone(&self.llm);
+
+        let raw = match llm.generate(&prompt, 128 * n as u32, call_seed, None, None).await {
+            Ok(r) => r,
+            Err(e) => {
+                warn!("Batch prayer eval failed: {} — prayers evaluated as hollow", e);
+                // Apply hollow results for all
+                for (idx, _) in evals {
+                    self.apply_prayer_result(*idx, "hollow");
+                }
+                return;
+            }
+        };
+        self.log_llm_call("prayer_eval_batch", "all", &prompt, &raw);
+
+        // Parse {"prayers":[{"agent":"...","quality":"..."},...]}
+        let parsed: Vec<(String, String)> = {
+            let v: serde_json::Value = serde_json::from_str(raw.trim())
+                .or_else(|_| {
+                    if let Some(s) = raw.find('{') {
+                        if let Some(e) = raw.rfind('}') {
+                            return serde_json::from_str(&raw[s..=e]);
+                        }
+                    }
+                    Err(serde_json::Error::io(std::io::Error::new(std::io::ErrorKind::Other, "no json")))
+                })
+                .unwrap_or(serde_json::Value::Null);
+
+            v.get("prayers")
+                .and_then(|a| a.as_array())
+                .map(|arr| {
+                    arr.iter()
+                        .filter_map(|item| {
+                            let agent   = item.get("agent")?.as_str()?.to_string();
+                            let quality = item.get("quality")?.as_str()?.to_string();
+                            Some((agent, quality))
+                        })
+                        .collect()
+                })
+                .unwrap_or_default()
+        };
+
+        // Apply results; default to hollow for missing
+        for (idx, _) in evals {
+            let agent_name = self.agents[*idx].name().to_string();
+            let quality = parsed.iter()
+                .find(|(n, _)| *n == agent_name)
+                .map(|(_, q)| q.as_str())
+                .unwrap_or("hollow");
+            self.apply_prayer_result(*idx, quality);
+        }
+    }
+
+    fn apply_prayer_result(&mut self, idx: usize, quality: &str) {
+        let dp_cfg = self.config.needs.daily_praise.clone();
+        let (mult, dev_gain): (f32, f32) = match quality {
+            "transcendent" => (2.5, dp_cfg.devotion_gain_transcendent),
+            "heartfelt"    => (1.5, dp_cfg.devotion_gain_heartfelt),
+            "sincere"      => (1.0, dp_cfg.devotion_gain_sincere),
+            _              => (0.3, 0.0),
+        };
+
+        let base           = 8.0f32;
+        let jitter_fun:    f32 = self.rng.gen_range(-3.0_f32..3.0_f32);
+        let jitter_social: f32 = self.rng.gen_range(-2.0_f32..2.0_f32);
+
+        let changes = crate::agent::NeedChanges {
+            fun:     Some((base * mult + jitter_fun).max(0.0)),
+            social:  Some((base * mult * 0.8 + jitter_social).max(0.0)),
+            hygiene: Some(base * 0.5 * mult),
+            energy:  if quality == "transcendent" { Some(10.0) } else { None },
+            ..Default::default()
+        };
+        self.agents[idx].needs.apply(&changes);
+        self.agents[idx].devotion = (self.agents[idx].devotion + dev_gain).clamp(0.0, 100.0);
     }
 
     fn build_intentions_prompt(&self, idx: usize, day: u32) -> String {

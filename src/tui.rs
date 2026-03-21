@@ -123,22 +123,26 @@ pub struct TuiApp {
     god_input_active:     bool,
     god_input_text:       String,
     god_input_target:     GodTarget,
+    // Quit confirmation (first q = confirm, second q = switch to streaming)
+    confirming_quit:      bool,
+    switch_to_streaming:  Arc<AtomicBool>,
 }
 
 impl TuiApp {
     pub fn new(
-        agent_count:      usize,
-        total_ticks:      u32,
-        ticks_per_day:    u32,
-        night_start_tick: u32,
-        seed:             u64,
-        backend_name:     String,
-        model_name:       String,
-        roster:           Vec<(String, Color)>,
-        god_name:         String,
-        paused:           Arc<AtomicBool>,
-        tick_delay_ms:    Arc<AtomicU64>,
-        god_queue:        Arc<Mutex<VecDeque<GodMessage>>>,
+        agent_count:         usize,
+        total_ticks:         u32,
+        ticks_per_day:       u32,
+        night_start_tick:    u32,
+        seed:                u64,
+        backend_name:        String,
+        model_name:          String,
+        roster:              Vec<(String, Color)>,
+        god_name:            String,
+        paused:              Arc<AtomicBool>,
+        tick_delay_ms:       Arc<AtomicU64>,
+        god_queue:           Arc<Mutex<VecDeque<GodMessage>>>,
+        switch_to_streaming: Arc<AtomicBool>,
     ) -> Self {
         TuiApp {
             map_cells:            vec![vec![], vec![]],
@@ -183,9 +187,11 @@ impl TuiApp {
             paused,
             tick_delay_ms,
             god_queue,
-            god_input_active:  false,
-            god_input_text:    String::new(),
-            god_input_target:  GodTarget::All,
+            god_input_active:    false,
+            god_input_text:      String::new(),
+            god_input_target:    GodTarget::All,
+            confirming_quit:     false,
+            switch_to_streaming,
         }
     }
 
@@ -477,7 +483,23 @@ impl TuiApp {
         // Tab 2 — Agent Detail: j/k/1-5 navigate agents; q/Esc quit
         if self.active_tab == 1 {
             match (key.modifiers, key.code) {
-                (_, KeyCode::Char('q')) | (_, KeyCode::Esc) => { self.should_quit = true; }
+                (_, KeyCode::Esc) => {
+                    if self.confirming_quit {
+                        self.confirming_quit = false;
+                    } else {
+                        self.should_quit = true;
+                    }
+                }
+                (_, KeyCode::Char('q')) => {
+                    if self.is_complete {
+                        self.should_quit = true;
+                    } else if self.confirming_quit {
+                        self.switch_to_streaming.store(true, Ordering::Relaxed);
+                        self.should_quit = true;
+                    } else {
+                        self.confirming_quit = true;
+                    }
+                }
                 (_, KeyCode::Char('?')) => { self.show_help = !self.show_help; }
                 (_, KeyCode::Char('j')) | (_, KeyCode::Down) => {
                     if self.agent_count > 0 {
@@ -511,7 +533,23 @@ impl TuiApp {
 
         // Tab 1 — World view
         match (key.modifiers, key.code) {
-            (_, KeyCode::Char('q')) | (_, KeyCode::Esc) => { self.should_quit = true; }
+            (_, KeyCode::Esc) => {
+                if self.confirming_quit {
+                    self.confirming_quit = false;
+                } else {
+                    self.should_quit = true;
+                }
+            }
+            (_, KeyCode::Char('q')) => {
+                if self.is_complete {
+                    self.should_quit = true;
+                } else if self.confirming_quit {
+                    self.switch_to_streaming.store(true, Ordering::Relaxed);
+                    self.should_quit = true;
+                } else {
+                    self.confirming_quit = true;
+                }
+            }
             (KeyModifiers::NONE, KeyCode::Char('d')) => {
                 self.show_llm_overlay = true;
                 self.llm_overlay_day = self.day;
@@ -695,6 +733,9 @@ impl TuiApp {
             if self.show_help {
                 self.render_help_overlay(f, area);
             }
+            if self.confirming_quit {
+                self.render_quit_confirm_overlay(f, area);
+            }
             return;
         }
 
@@ -727,6 +768,9 @@ impl TuiApp {
         }
         if self.god_input_active {
             self.render_god_overlay(f, area);
+        }
+        if self.confirming_quit {
+            self.render_quit_confirm_overlay(f, area);
         }
     }
 
@@ -1198,6 +1242,39 @@ impl TuiApp {
                 Span::raw(" Send    "),
                 Span::styled("[Esc]", Style::default().fg(Color::LightRed)),
                 Span::raw(" Cancel"),
+            ]),
+        ];
+
+        let para = Paragraph::new(lines).block(block);
+        f.render_widget(ratatui::widgets::Clear, popup_area);
+        f.render_widget(para, popup_area);
+    }
+
+    fn render_quit_confirm_overlay(&self, f: &mut ratatui::Frame, area: ratatui::layout::Rect) {
+        let popup_width  = 56u16;
+        let popup_height = 5u16;
+        let x = area.x + area.width.saturating_sub(popup_width) / 2;
+        let y = area.y + area.height.saturating_sub(popup_height) / 2;
+        let popup_area = Rect {
+            x, y,
+            width:  popup_width.min(area.width),
+            height: popup_height.min(area.height),
+        };
+
+        let block = Block::default()
+            .title(" QUIT? ")
+            .borders(Borders::ALL)
+            .border_style(Style::default().fg(Color::LightYellow).add_modifier(Modifier::BOLD));
+
+        let lines = vec![
+            Line::from(""),
+            Line::from(vec![
+                Span::styled("  [q]", Style::default().fg(Color::LightYellow).add_modifier(Modifier::BOLD)),
+                Span::raw(" Exit TUI and switch to terminal output"),
+            ]),
+            Line::from(vec![
+                Span::styled("  [Esc]", Style::default().fg(Color::LightGreen)),
+                Span::raw(" Cancel — stay in TUI"),
             ]),
         ];
 

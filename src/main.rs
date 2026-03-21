@@ -328,8 +328,9 @@ async fn run_tui(
     let god_name_owned    = world.config.world.god_name.clone();
 
     // A1: pause/resume + tick speed atomics
-    let paused       = Arc::new(AtomicBool::new(false));
-    let tick_delay   = Arc::new(AtomicU64::new(cfg.simulation.tick_delay_ms));
+    let paused               = Arc::new(AtomicBool::new(false));
+    let tick_delay           = Arc::new(AtomicU64::new(cfg.simulation.tick_delay_ms));
+    let switch_to_streaming  = Arc::new(AtomicBool::new(false));
 
     let (tx, rx) = tokio::sync::mpsc::channel::<tui_event::TuiEvent>(512);
 
@@ -343,11 +344,12 @@ async fn run_tui(
     let sim_handle = tokio::spawn(sim_runner::run_simulation(
         tx, world, total_ticks, seed, backend_owned.clone(), souls_owned,
         Arc::clone(&paused), Arc::clone(&tick_delay), god_queue_sim,
+        Arc::clone(&switch_to_streaming),
     ));
 
     // Run TUI in a blocking thread (crossterm needs blocking I/O)
     let tui_handle = tokio::task::spawn_blocking(move || {
-        let mut app = tui::TuiApp::new(agent_count, total_ticks, ticks_per_day, night_start_tick, seed, backend_owned, model_owned, roster, god_name_owned, paused, tick_delay, god_queue_tui);
+        let mut app = tui::TuiApp::new(agent_count, total_ticks, ticks_per_day, night_start_tick, seed, backend_owned, model_owned, roster, god_name_owned, paused, tick_delay, god_queue_tui, switch_to_streaming);
         app.run(rx)
     });
 
