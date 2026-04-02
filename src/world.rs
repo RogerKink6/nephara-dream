@@ -4813,4 +4813,322 @@ mod tests {
 
         assert!(world.agent_backends.contains_key(&0));
     }
+
+    // -----------------------------------------------------------------------
+    // Phase 2 audit: comprehensive per-agent backend routing tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn empty_agent_backends_map_all_use_global() {
+        let config = crate::config::load("config/world.toml").expect("config");
+        let seeds  = crate::soul::load_all("souls").expect("souls");
+        let n = seeds.len();
+        let rng    = StdRng::seed_from_u64(42);
+        let mock   = Arc::new(crate::llm::MockBackend::new(StdRng::seed_from_u64(42)));
+        let run_log = crate::log::RunLog::new_test();
+
+        let world = World::new(
+            seeds, config, 42, rng,
+            mock.clone(), mock,
+            run_log, "souls".to_string(), true,
+        ).unwrap();
+
+        // Empty agent_backends — all agents should resolve without panic
+        assert!(world.agent_backends.is_empty());
+        for i in 0..n {
+            let _ = world.llm_for_agent(i);
+        }
+    }
+
+    #[test]
+    fn llm_for_agent_out_of_range_returns_global() {
+        let config = crate::config::load("config/world.toml").expect("config");
+        let seeds  = crate::soul::load_all("souls").expect("souls");
+        let rng    = StdRng::seed_from_u64(42);
+        let mock   = Arc::new(crate::llm::MockBackend::new(StdRng::seed_from_u64(42)));
+        let run_log = crate::log::RunLog::new_test();
+
+        let world = World::new(
+            seeds, config, 42, rng,
+            mock.clone(), mock,
+            run_log, "souls".to_string(), true,
+        ).unwrap();
+
+        // Index beyond agent count — should fall back to global, not panic
+        let _ = world.llm_for_agent(100);
+        let _ = world.llm_for_agent(usize::MAX);
+    }
+
+    #[test]
+    fn mixed_scenario_some_agents_override_some_global() {
+        let config = crate::config::load("config/world.toml").expect("config");
+        let seeds  = crate::soul::load_all("souls").expect("souls");
+        let n = seeds.len();
+        assert!(n >= 3, "need at least 3 agents for mixed scenario test");
+        let rng    = StdRng::seed_from_u64(42);
+        let mock_global = Arc::new(crate::llm::MockBackend::new(StdRng::seed_from_u64(42)));
+        let run_log = crate::log::RunLog::new_test();
+
+        let mut world = World::new(
+            seeds, config, 42, rng,
+            mock_global.clone(), mock_global.clone(),
+            run_log, "souls".to_string(), true,
+        ).unwrap();
+
+        // Set hermes for agents 0 and 2, leave agent 1 on global
+        let hermes = Arc::new(crate::llm::HermesBackend::new("http://localhost:7777".to_string()));
+        world.set_agent_backend(0, hermes.clone());
+        world.set_agent_backend(2, hermes);
+
+        assert!(world.agent_backends.contains_key(&0));
+        assert!(!world.agent_backends.contains_key(&1));
+        assert!(world.agent_backends.contains_key(&2));
+        assert_eq!(world.agent_backends.len(), 2);
+
+        // All should resolve without panic
+        for i in 0..n {
+            let _ = world.llm_for_agent(i);
+        }
+    }
+
+    #[test]
+    fn multiple_agents_with_hermes_backend() {
+        let config = crate::config::load("config/world.toml").expect("config");
+        let seeds  = crate::soul::load_all("souls").expect("souls");
+        let n = seeds.len();
+        let rng    = StdRng::seed_from_u64(42);
+        let mock   = Arc::new(crate::llm::MockBackend::new(StdRng::seed_from_u64(42)));
+        let run_log = crate::log::RunLog::new_test();
+
+        let mut world = World::new(
+            seeds, config, 42, rng,
+            mock.clone(), mock,
+            run_log, "souls".to_string(), true,
+        ).unwrap();
+
+        // Assign hermes to ALL agents
+        let hermes = Arc::new(crate::llm::HermesBackend::new("http://localhost:7777".to_string()));
+        for i in 0..n {
+            world.set_agent_backend(i, hermes.clone());
+        }
+
+        assert_eq!(world.agent_backends.len(), n);
+        for i in 0..n {
+            assert!(world.agent_backends.contains_key(&i));
+        }
+    }
+
+    #[test]
+    fn set_agent_backend_replaces_existing_override() {
+        let config = crate::config::load("config/world.toml").expect("config");
+        let seeds  = crate::soul::load_all("souls").expect("souls");
+        let rng    = StdRng::seed_from_u64(42);
+        let mock   = Arc::new(crate::llm::MockBackend::new(StdRng::seed_from_u64(42)));
+        let run_log = crate::log::RunLog::new_test();
+
+        let mut world = World::new(
+            seeds, config, 42, rng,
+            mock.clone(), mock,
+            run_log, "souls".to_string(), true,
+        ).unwrap();
+
+        // Set hermes, then replace with a different hermes URL
+        let hermes1 = Arc::new(crate::llm::HermesBackend::new("http://host1:7777".to_string()));
+        let hermes2 = Arc::new(crate::llm::HermesBackend::new("http://host2:8888".to_string()));
+        world.set_agent_backend(0, hermes1);
+        assert!(world.agent_backends.contains_key(&0));
+
+        world.set_agent_backend(0, hermes2);
+        // Still exactly 1 entry for agent 0
+        assert_eq!(world.agent_backends.len(), 1);
+        assert!(world.agent_backends.contains_key(&0));
+    }
+
+    #[tokio::test]
+    async fn per_agent_backend_mixed_tick_runs() {
+        // Run ticks with a mix of overridden and global agents
+        let config = crate::config::load("config/world.toml").expect("config");
+        let seeds  = crate::soul::load_all("souls").expect("souls");
+        let n = seeds.len();
+        assert!(n >= 2, "need at least 2 agents");
+        let rng    = StdRng::seed_from_u64(42);
+        let mock_global = Arc::new(crate::llm::MockBackend::new(StdRng::seed_from_u64(42)));
+        let mock_agent  = Arc::new(crate::llm::MockBackend::new(StdRng::seed_from_u64(123)));
+        let run_log = crate::log::RunLog::new_test();
+
+        let mut world = World::new(
+            seeds, config, 42, rng,
+            mock_global.clone(), mock_global.clone(),
+            run_log, "souls".to_string(), true,
+        ).unwrap();
+
+        // Override agent 0 only
+        world.set_agent_backend(0, mock_agent);
+
+        // Run 3 ticks — all should complete successfully
+        for _ in 0..3 {
+            let result = world.tick().await.expect("tick should succeed");
+            assert_eq!(result.entries.len(), n,
+                "each tick should produce one entry per agent");
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // Phase 2 audit: dream config integration with backend:"hermes"
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn dream_config_hermes_backend_creates_correct_routing() {
+        // Simulate the main.rs pattern: soul seeds with backend:"hermes"
+        // get HermesBackend assigned via set_agent_backend
+        let config = crate::config::load("config/world.toml").expect("config");
+        let seeds  = crate::soul::load_all("souls").expect("souls");
+        let rng    = StdRng::seed_from_u64(42);
+        let mock   = Arc::new(crate::llm::MockBackend::new(StdRng::seed_from_u64(42)));
+        let run_log = crate::log::RunLog::new_test();
+
+        let mut world = World::new(
+            seeds.clone(), config, 42, rng,
+            mock.clone(), mock,
+            run_log, "souls".to_string(), true,
+        ).unwrap();
+
+        // Simulate the main.rs pattern for assigning hermes backends
+        let hermes_url = "http://localhost:7777";
+        let hermes_backend: Option<Arc<dyn crate::llm::LlmBackend>> =
+            if seeds.iter().any(|s| s.backend.as_deref() == Some("hermes")) {
+                Some(Arc::new(crate::llm::HermesBackend::new(hermes_url.to_string())))
+            } else {
+                None
+            };
+
+        for (idx, soul) in seeds.iter().enumerate() {
+            if soul.backend.as_deref() == Some("hermes") {
+                if let Some(ref hb) = hermes_backend {
+                    world.set_agent_backend(idx, Arc::clone(hb));
+                }
+            }
+        }
+
+        // Verify: count of overrides matches count of hermes souls
+        let hermes_count = seeds.iter().filter(|s| s.backend.as_deref() == Some("hermes")).count();
+        assert_eq!(world.agent_backends.len(), hermes_count);
+    }
+
+    #[test]
+    fn dream_config_no_backend_uses_global_only() {
+        // When no souls have backend:"hermes", no overrides should be set
+        let config = crate::config::load("config/world.toml").expect("config");
+        let seeds  = crate::soul::load_all("souls").expect("souls");
+        let rng    = StdRng::seed_from_u64(42);
+        let mock   = Arc::new(crate::llm::MockBackend::new(StdRng::seed_from_u64(42)));
+        let run_log = crate::log::RunLog::new_test();
+
+        let world = World::new(
+            seeds.clone(), config, 42, rng,
+            mock.clone(), mock,
+            run_log, "souls".to_string(), true,
+        ).unwrap();
+
+        // The standard souls directory shouldn't have hermes backends
+        // (only dream configs would have that), so agent_backends should be empty
+        let hermes_count = seeds.iter().filter(|s| s.backend.as_deref() == Some("hermes")).count();
+        if hermes_count == 0 {
+            assert!(world.agent_backends.is_empty(),
+                "no hermes souls means no agent backend overrides");
+        }
+    }
+
+    #[test]
+    fn new_from_dream_initializes_empty_agent_backends() {
+        // Verify new_from_dream() starts with empty agent_backends
+        // (backends are assigned after construction in main.rs)
+        let dream_json = r#"{
+            "world": {"name": "TestDream"},
+            "locations": [
+                {"name": "Plaza", "tile_type": "Square", "position": [10, 10]}
+            ],
+            "npcs": [
+                {
+                    "name": "TestAgent",
+                    "vigor": 6, "wit": 6, "grace": 6, "heart": 6, "numen": 6,
+                    "personality_prompt": "friendly and curious"
+                }
+            ]
+        }"#;
+        let dream_cfg: crate::dream_config::DreamWorldConfig = serde_json::from_str(dream_json).expect("parse dream config");
+
+        let config = crate::config::load("config/world.toml").expect("config");
+        let seeds  = crate::dream_config::npcs_to_seeds(&dream_cfg);
+        let rng    = StdRng::seed_from_u64(42);
+        let mock   = Arc::new(crate::llm::MockBackend::new(StdRng::seed_from_u64(42)));
+        let run_log = crate::log::RunLog::new_test();
+
+        let world = World::new_from_dream(
+            seeds, &dream_cfg, config, 42, rng,
+            mock.clone(), mock,
+            run_log, "test_souls".to_string(), true,
+        ).unwrap();
+
+        assert!(world.agent_backends.is_empty(),
+            "new_from_dream should start with empty agent_backends");
+    }
+
+    #[test]
+    fn new_from_dream_with_hermes_npc_gets_override() {
+        // Dream config with one NPC having backend:"hermes" — verify the main.rs
+        // pattern correctly assigns the override after construction
+        let dream_json = r#"{
+            "world": {"name": "HermesDream"},
+            "locations": [
+                {"name": "Plaza", "tile_type": "Square", "position": [10, 10]}
+            ],
+            "npcs": [
+                {
+                    "name": "NormalAgent",
+                    "vigor": 6, "wit": 6, "grace": 6, "heart": 6, "numen": 6,
+                    "personality_prompt": "a regular villager"
+                },
+                {
+                    "name": "HermesAgent",
+                    "vigor": 6, "wit": 6, "grace": 6, "heart": 6, "numen": 6,
+                    "personality_prompt": "controlled by hermes",
+                    "backend": "hermes"
+                }
+            ]
+        }"#;
+        let dream_cfg: crate::dream_config::DreamWorldConfig = serde_json::from_str(dream_json).expect("parse dream config");
+
+        let config = crate::config::load("config/world.toml").expect("config");
+        let seeds  = crate::dream_config::npcs_to_seeds(&dream_cfg);
+        let rng    = StdRng::seed_from_u64(42);
+        let mock   = Arc::new(crate::llm::MockBackend::new(StdRng::seed_from_u64(42)));
+        let run_log = crate::log::RunLog::new_test();
+
+        let mut world = World::new_from_dream(
+            seeds.clone(), &dream_cfg, config, 42, rng,
+            mock.clone(), mock,
+            run_log, "test_souls".to_string(), true,
+        ).unwrap();
+
+        // Simulate main.rs hermes assignment
+        let hermes_backend: Option<Arc<dyn crate::llm::LlmBackend>> =
+            if seeds.iter().any(|s| s.backend.as_deref() == Some("hermes")) {
+                Some(Arc::new(crate::llm::HermesBackend::new("http://localhost:7777".to_string())))
+            } else {
+                None
+            };
+
+        for (idx, soul) in seeds.iter().enumerate() {
+            if soul.backend.as_deref() == Some("hermes") {
+                if let Some(ref hb) = hermes_backend {
+                    world.set_agent_backend(idx, Arc::clone(hb));
+                }
+            }
+        }
+
+        // Exactly 1 agent should have the hermes override
+        assert_eq!(world.agent_backends.len(), 1,
+            "only HermesAgent should have a backend override");
+    }
 }

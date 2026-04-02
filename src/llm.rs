@@ -777,6 +777,22 @@ impl HermesBackend {
             .unwrap_or_else(|_| reqwest::Client::new());
         HermesBackend { base_url, client }
     }
+
+    /// Extract agent name from prompt (best-effort: look for "You are <Name>").
+    /// Public for testing.
+    pub fn extract_agent_name(prompt: &str) -> &str {
+        prompt.lines()
+            .find(|l| l.starts_with("You are "))
+            .and_then(|l| l.strip_prefix("You are "))
+            .and_then(|l| l.split(|c: char| c == '.' || c == ',').next())
+            .unwrap_or("unknown")
+            .trim()
+    }
+
+    /// Build the action URL from the base URL. Public for testing.
+    pub fn action_url(&self) -> String {
+        format!("{}/action", self.base_url)
+    }
 }
 
 #[derive(Serialize)]
@@ -795,15 +811,10 @@ impl LlmBackend for HermesBackend {
         _schema:    Option<&serde_json::Value>,
         _token_tx:  Option<UnboundedSender<String>>,
     ) -> Result<String> {
-        let url = format!("{}/action", self.base_url);
+        let url = self.action_url();
 
         // Extract agent name from prompt (best-effort: look for "You are <Name>")
-        let agent_name = prompt.lines()
-            .find(|l| l.starts_with("You are "))
-            .and_then(|l| l.strip_prefix("You are "))
-            .and_then(|l| l.split(|c: char| c == '.' || c == ',').next())
-            .unwrap_or("unknown")
-            .trim();
+        let agent_name = Self::extract_agent_name(prompt);
 
         let body = HermesActionRequest {
             prompt,
@@ -1188,6 +1199,84 @@ mod tests {
     fn hermes_backend_new_custom_url() {
         let hb = HermesBackend::new("http://myhost:9999".to_string());
         assert_eq!(hb.base_url, "http://myhost:9999");
+    }
+
+    // -----------------------------------------------------------------------
+    // HermesBackend: agent name extraction
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn hermes_extract_agent_name_standard() {
+        let prompt = "You are Elara. You live in the village.\nChoose an action.";
+        assert_eq!(HermesBackend::extract_agent_name(prompt), "Elara");
+    }
+
+    #[test]
+    fn hermes_extract_agent_name_comma_separated() {
+        let prompt = "You are Rowan, a quiet fisherman.\nChoose an action.";
+        assert_eq!(HermesBackend::extract_agent_name(prompt), "Rowan");
+    }
+
+    #[test]
+    fn hermes_extract_agent_name_no_match() {
+        let prompt = "Choose an action for the agent.\nNo name here.";
+        assert_eq!(HermesBackend::extract_agent_name(prompt), "unknown");
+    }
+
+    #[test]
+    fn hermes_extract_agent_name_empty_prompt() {
+        assert_eq!(HermesBackend::extract_agent_name(""), "unknown");
+    }
+
+    #[test]
+    fn hermes_extract_agent_name_multiline_finds_first() {
+        let prompt = "Some preamble.\nYou are Thane. You are strong.\nMore text.";
+        assert_eq!(HermesBackend::extract_agent_name(prompt), "Thane");
+    }
+
+    #[test]
+    fn hermes_extract_agent_name_with_extra_whitespace() {
+        // The name "  Mira  " should be trimmed
+        let prompt = "You are   Mira  . She is wise.";
+        assert_eq!(HermesBackend::extract_agent_name(prompt), "Mira");
+    }
+
+    // -----------------------------------------------------------------------
+    // HermesBackend: URL construction
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn hermes_action_url_default() {
+        let hb = HermesBackend::new("http://localhost:7777".to_string());
+        assert_eq!(hb.action_url(), "http://localhost:7777/action");
+    }
+
+    #[test]
+    fn hermes_action_url_custom_port() {
+        let hb = HermesBackend::new("http://192.168.1.5:8080".to_string());
+        assert_eq!(hb.action_url(), "http://192.168.1.5:8080/action");
+    }
+
+    #[test]
+    fn hermes_action_url_trailing_slash_preserved() {
+        // If user accidentally adds trailing slash, it gets doubled — verifying current behavior
+        let hb = HermesBackend::new("http://localhost:7777/".to_string());
+        assert_eq!(hb.action_url(), "http://localhost:7777//action");
+    }
+
+    // -----------------------------------------------------------------------
+    // HermesBackend: HermesActionRequest serialization
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn hermes_action_request_serializes_correctly() {
+        let req = HermesActionRequest {
+            prompt:     "You are Elara. Choose an action.",
+            agent_name: "Elara",
+        };
+        let json: serde_json::Value = serde_json::to_value(&req).unwrap();
+        assert_eq!(json["prompt"], "You are Elara. Choose an action.");
+        assert_eq!(json["agent_name"], "Elara");
     }
 
     #[test]
