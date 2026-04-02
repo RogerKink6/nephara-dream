@@ -761,6 +761,95 @@ impl LlmBackend for LlmCliBackend {
 }
 
 // ---------------------------------------------------------------------------
+// Hermes backend — bridges to the Hermes agent system via HTTP
+// ---------------------------------------------------------------------------
+
+pub struct HermesBackend {
+    pub base_url: String,
+    client:       reqwest::Client,
+}
+
+impl HermesBackend {
+    pub fn new(base_url: String) -> Self {
+        let client = reqwest::Client::builder()
+            .timeout(Duration::from_secs(30))
+            .build()
+            .unwrap_or_else(|_| reqwest::Client::new());
+        HermesBackend { base_url, client }
+    }
+}
+
+#[derive(Serialize)]
+struct HermesActionRequest<'a> {
+    prompt:     &'a str,
+    agent_name: &'a str,
+}
+
+#[async_trait]
+impl LlmBackend for HermesBackend {
+    async fn generate(
+        &self,
+        prompt:     &str,
+        _max_tokens: u32,
+        _seed:      Option<u64>,
+        _schema:    Option<&serde_json::Value>,
+        _token_tx:  Option<UnboundedSender<String>>,
+    ) -> Result<String> {
+        let url = format!("{}/action", self.base_url);
+
+        // Extract agent name from prompt (best-effort: look for "You are <Name>")
+        let agent_name = prompt.lines()
+            .find(|l| l.starts_with("You are "))
+            .and_then(|l| l.strip_prefix("You are "))
+            .and_then(|l| l.split(|c: char| c == '.' || c == ',').next())
+            .unwrap_or("unknown")
+            .trim();
+
+        let body = HermesActionRequest {
+            prompt,
+            agent_name,
+        };
+
+        debug!(target: "llm", url = %url, agent = %agent_name,
+               prompt_chars = prompt.len(), "Hermes request");
+
+        let do_request = || async {
+            let resp = self.client
+                .post(&url)
+                .json(&body)
+                .send()
+                .await
+                .map_err(|e| format!("Hermes HTTP error: {}", e))?;
+
+            if !resp.status().is_success() {
+                let status = resp.status();
+                let text   = resp.text().await.unwrap_or_default();
+                return Err(format!("Hermes returned {}: {}", status, text).into());
+            }
+
+            let text = resp.text().await
+                .map_err(|e| format!("Hermes response read error: {}", e))?;
+            Ok::<String, Box<dyn std::error::Error + Send + Sync>>(text)
+        };
+
+        // First attempt
+        let result = do_request().await;
+        let text = match result {
+            Ok(t) => t,
+            Err(e) => {
+                warn!(target: "llm", error = %e, "Hermes first attempt failed, retrying");
+                // One retry
+                do_request().await?
+            }
+        };
+
+        let text = sanitize_llm_output(text);
+        debug!(target: "llm", chars = text.len(), response = %text, "Hermes response");
+        Ok(text)
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Mock backend — fully deterministic, returns plausible JSON actions
 // ---------------------------------------------------------------------------
 
@@ -1083,6 +1172,22 @@ mod tests {
             assert!(!summary.is_empty(),
                 "MOCK_CHAT_SUMMARIES[{}] should have non-empty summary", i);
         }
+    }
+
+    // -----------------------------------------------------------------------
+    // HermesBackend construction
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn hermes_backend_new_stores_url() {
+        let hb = HermesBackend::new("http://localhost:7777".to_string());
+        assert_eq!(hb.base_url, "http://localhost:7777");
+    }
+
+    #[test]
+    fn hermes_backend_new_custom_url() {
+        let hb = HermesBackend::new("http://myhost:9999".to_string());
+        assert_eq!(hb.base_url, "http://myhost:9999");
     }
 
     #[test]

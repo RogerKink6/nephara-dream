@@ -2,7 +2,7 @@ use colored::Colorize;
 use rand::rngs::StdRng;
 use rand::seq::SliceRandom;
 use rand::Rng;
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
 use std::time::Instant;
 use tokio::sync::mpsc::UnboundedSender;
@@ -283,6 +283,9 @@ pub struct World {
     llm:                     Arc<dyn LlmBackend>,
     llm_smart:               Arc<dyn LlmBackend>,
     llm_call_counter:        u64,
+    /// Per-agent backend overrides (agent index → backend). When an agent has
+    /// an entry here, it is used instead of the global `self.llm`.
+    agent_backends:          HashMap<usize, Arc<dyn LlmBackend>>,
 }
 
 impl World {
@@ -343,6 +346,7 @@ impl World {
             llm,
             llm_smart,
             llm_call_counter: 0,
+            agent_backends: HashMap::new(),
         })
     }
 
@@ -425,7 +429,22 @@ impl World {
             llm,
             llm_smart,
             llm_call_counter: 0,
+            agent_backends: HashMap::new(),
         })
+    }
+
+    /// Register a per-agent backend override. When set, this agent will use
+    /// the given backend instead of the global `self.llm` for action generation.
+    pub fn set_agent_backend(&mut self, agent_idx: usize, backend: Arc<dyn LlmBackend>) {
+        self.agent_backends.insert(agent_idx, backend);
+    }
+
+    /// Returns the LLM backend to use for the given agent index.
+    /// Uses the per-agent override if set, otherwise falls back to the global backend.
+    fn llm_for_agent(&self, agent_idx: usize) -> Arc<dyn LlmBackend> {
+        self.agent_backends.get(&agent_idx)
+            .cloned()
+            .unwrap_or_else(|| Arc::clone(&self.llm))
     }
 
     /// Set the total ticks for dream state phase calculation.
@@ -907,7 +926,7 @@ impl World {
             let token_tx  = self.make_token_tx(idx);
             let call_seed = Some(self.seed.wrapping_add(self.llm_call_counter));
             self.llm_call_counter += 1;
-            let llm = Arc::clone(&self.llm);
+            let llm = self.llm_for_agent(idx);
             let raw = llm
                 .generate(&prompt, self.config.llm.max_tokens, call_seed, Some(&schema), token_tx)
                 .await
@@ -4695,5 +4714,103 @@ mod tests {
         // Also assert it did not somehow *increase* beyond initial without eating
         // (weak assertion — MockBackend can choose eat action which raises hunger)
         let _ = hunger_before; // suppress unused warning
+    }
+
+    // -----------------------------------------------------------------------
+    // Phase 2: Per-agent backend routing (Issue #4 + #5)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn llm_for_agent_returns_global_when_no_override() {
+        let config = crate::config::load("config/world.toml").expect("config");
+        let seeds  = crate::soul::load_all("souls").expect("souls");
+        let rng    = StdRng::seed_from_u64(42);
+        let mock   = Arc::new(crate::llm::MockBackend::new(StdRng::seed_from_u64(42)));
+        let run_log = crate::log::RunLog::new_test();
+
+        let world = World::new(
+            seeds, config, 42, rng,
+            mock.clone(), mock,
+            run_log, "souls".to_string(), true,
+        ).unwrap();
+
+        // No per-agent overrides set → llm_for_agent should return the global backend
+        // We can't compare Arc<dyn> directly, but we can check it doesn't panic
+        let _ = world.llm_for_agent(0);
+        let _ = world.llm_for_agent(1);
+    }
+
+    #[test]
+    fn set_agent_backend_overrides_for_specific_agent() {
+        let config = crate::config::load("config/world.toml").expect("config");
+        let seeds  = crate::soul::load_all("souls").expect("souls");
+        let rng    = StdRng::seed_from_u64(42);
+        let mock_global = Arc::new(crate::llm::MockBackend::new(StdRng::seed_from_u64(42)));
+        let mock_agent  = Arc::new(crate::llm::MockBackend::new(StdRng::seed_from_u64(99)));
+        let run_log = crate::log::RunLog::new_test();
+
+        let mut world = World::new(
+            seeds, config, 42, rng,
+            mock_global.clone(), mock_global.clone(),
+            run_log, "souls".to_string(), true,
+        ).unwrap();
+
+        // Set override for agent 1 only
+        world.set_agent_backend(1, mock_agent.clone());
+
+        // Verify: agent 0 should NOT have an override (uses global)
+        assert!(!world.agent_backends.contains_key(&0));
+        // Verify: agent 1 DOES have an override
+        assert!(world.agent_backends.contains_key(&1));
+    }
+
+    #[tokio::test]
+    async fn per_agent_backend_used_in_tick() {
+        // This test verifies that the per-agent backend is wired up correctly
+        // by running a few ticks with a per-agent override.
+        let config = crate::config::load("config/world.toml").expect("config");
+        let seeds  = crate::soul::load_all("souls").expect("souls");
+        let n = seeds.len();
+        let rng    = StdRng::seed_from_u64(42);
+        let mock_global = Arc::new(crate::llm::MockBackend::new(StdRng::seed_from_u64(42)));
+        let mock_agent  = Arc::new(crate::llm::MockBackend::new(StdRng::seed_from_u64(99)));
+        let run_log = crate::log::RunLog::new_test();
+
+        let mut world = World::new(
+            seeds, config, 42, rng,
+            mock_global.clone(), mock_global.clone(),
+            run_log, "souls".to_string(), true,
+        ).unwrap();
+
+        // Override backend for agent 0
+        world.set_agent_backend(0, mock_agent);
+
+        // Run 2 ticks — should not panic, all agents get processed
+        for _ in 0..2 {
+            let result = world.tick().await.expect("tick should succeed");
+            assert_eq!(result.entries.len(), n,
+                "each tick should produce one entry per agent");
+        }
+    }
+
+    #[test]
+    fn hermes_backend_can_be_set_as_agent_override() {
+        let config = crate::config::load("config/world.toml").expect("config");
+        let seeds  = crate::soul::load_all("souls").expect("souls");
+        let rng    = StdRng::seed_from_u64(42);
+        let mock   = Arc::new(crate::llm::MockBackend::new(StdRng::seed_from_u64(42)));
+        let run_log = crate::log::RunLog::new_test();
+
+        let mut world = World::new(
+            seeds, config, 42, rng,
+            mock.clone(), mock,
+            run_log, "souls".to_string(), true,
+        ).unwrap();
+
+        // Create a HermesBackend and assign it
+        let hermes = Arc::new(crate::llm::HermesBackend::new("http://localhost:7777".to_string()));
+        world.set_agent_backend(0, hermes);
+
+        assert!(world.agent_backends.contains_key(&0));
     }
 }

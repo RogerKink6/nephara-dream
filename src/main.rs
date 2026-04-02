@@ -24,7 +24,7 @@ use rand::{Rng, SeedableRng};
 use tracing::{error, info, warn};
 use tracing_subscriber::EnvFilter;
 
-use llm::{ClaudeBackend, ClaudeCliBackend, LlmBackend, LlmCliBackend, MockBackend, OllamaBackend, OpenAICompatBackend};
+use llm::{ClaudeBackend, ClaudeCliBackend, HermesBackend, LlmBackend, LlmCliBackend, MockBackend, OllamaBackend, OpenAICompatBackend};
 use log::RunLog;
 use world::World;
 
@@ -108,6 +108,10 @@ struct Cli {
     /// generated from this config instead of using the default village setup.
     #[arg(long)]
     dream_config: Option<String>,
+
+    /// URL for the Hermes bridge backend (used when a soul seed has backend: "hermes").
+    #[arg(long, default_value = "http://localhost:7777")]
+    hermes_url: String,
 
     #[command(subcommand)]
     command: Option<Commands>,
@@ -322,15 +326,36 @@ async fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let is_test_run = cli.llm == "mock";
     let mut world = if let Some(ref dc) = dream_cfg {
         World::new_from_dream(
-            souls, dc, cfg.clone(), seed, rng,
+            souls.clone(), dc, cfg.clone(), seed, rng,
             backend, smart_backend, run_log, souls_dir.clone(), is_test_run,
         )?
     } else {
         World::new(
-            souls, cfg.clone(), seed, rng,
+            souls.clone(), cfg.clone(), seed, rng,
             backend, smart_backend, run_log, souls_dir.clone(), is_test_run,
         )?
     };
+
+    // --- Per-agent backend overrides (Issue #4 + #5) ---
+    // Assign HermesBackend to agents whose soul seed has backend: "hermes"
+    {
+        let hermes_backend: Option<Arc<dyn LlmBackend>> = if souls.iter().any(|s| s.backend.as_deref() == Some("hermes")) {
+            info!("Creating HermesBackend at {} for agents with backend='hermes'", cli.hermes_url);
+            Some(Arc::new(HermesBackend::new(cli.hermes_url.clone())))
+        } else {
+            None
+        };
+
+        for (idx, soul) in souls.iter().enumerate() {
+            if soul.backend.as_deref() == Some("hermes") {
+                if let Some(ref hb) = hermes_backend {
+                    info!("Agent '{}' (idx={}) using HermesBackend", soul.name, idx);
+                    world.set_agent_backend(idx, Arc::clone(hb));
+                }
+            }
+        }
+    }
+
     world.load_stories().await;
     world.summarize_journal_memories().await;
 
