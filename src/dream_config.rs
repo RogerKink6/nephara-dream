@@ -185,6 +185,7 @@ fn npc_to_seed(npc: &DreamNpc) -> SoulSeed {
         heart:            npc.heart,
         numen:            npc.numen,
         specialty:        npc.specialty.clone().or_else(|| npc.archetype.clone()),
+        backend:          npc.backend.clone(),
         personality:      npc.personality_prompt.clone(),
         backstory:        npc.backstory.clone().unwrap_or_else(|| format!("{} appeared one day, as if always meant to be here.", npc.name)),
         magical_affinity: npc.magical_affinity.clone().unwrap_or_else(|| "Their magic follows their nature.".to_string()),

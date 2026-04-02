@@ -4179,6 +4179,7 @@ mod tests {
             heart:            6,
             numen:            6,
             specialty:        None,
+            backend:          None,
             personality:      "quiet and thoughtful".to_string(),
             backstory:        "came from the hills".to_string(),
             magical_affinity: "earth".to_string(),
