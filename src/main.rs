@@ -3,6 +3,7 @@ mod agent;
 mod bench;
 mod color;
 mod config;
+mod dream_config;
 mod llm;
 mod log;
 mod magic;
@@ -101,6 +102,11 @@ struct Cli {
     /// Use streaming terminal output instead of the fullscreen TUI.
     #[arg(long)]
     no_tui: bool,
+
+    /// Path to a dream world JSON config file. When provided, the world is
+    /// generated from this config instead of using the default village setup.
+    #[arg(long)]
+    dream_config: Option<String>,
 
     #[command(subcommand)]
     command: Option<Commands>,
@@ -233,8 +239,36 @@ async fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         }
     };
 
-    // --- Soul seeds ---
-    let souls = soul::load_all(&cli.souls)?;
+    // --- Dream config or standard soul seeds ---
+    let dream_cfg = match &cli.dream_config {
+        Some(path) => {
+            let dc = dream_config::load(path)?;
+            info!("Loaded dream config '{}': world='{}', {} locations, {} NPCs",
+                path, dc.world.name, dc.locations.len(), dc.npcs.len());
+            Some(dc)
+        }
+        None => None,
+    };
+
+    let souls_dir = if dream_cfg.is_some() {
+        // Use a separate directory for dream soul seeds to avoid polluting the
+        // original souls/ directory.
+        let dir = format!("{}/dream_souls", cli.souls);
+        std::fs::create_dir_all(&dir).ok();
+        dir
+    } else {
+        cli.souls.clone()
+    };
+
+    let souls = if let Some(ref dc) = dream_cfg {
+        let seeds = dream_config::npcs_to_seeds(dc);
+        dream_config::write_soul_seeds(&seeds, &souls_dir)?;
+        info!("Generated {} dream soul seeds in '{}'", seeds.len(), souls_dir);
+        seeds
+    } else {
+        soul::load_all(&cli.souls)?
+    };
+
     info!("Loaded {} soul seeds: {}", souls.len(),
         souls.iter().map(|s| s.name.as_str()).collect::<Vec<_>>().join(", "));
 
@@ -276,22 +310,36 @@ async fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
 
     info!("Run output: runs/{}/", run_log.run_id);
 
+    // --- Override god_name from dream config ---
+    if let Some(ref dc) = dream_cfg {
+        if let Some(ref god_name) = dc.world.god_name {
+            cfg.world.god_name = god_name.clone();
+        }
+    }
+
     // --- World ---
     let is_test_run = cli.llm == "mock";
-    let mut world = World::new(
-        souls, cfg.clone(), seed, rng,
-        backend, smart_backend, run_log, cli.souls.clone(), is_test_run,
-    )?;
+    let mut world = if let Some(ref dc) = dream_cfg {
+        World::new_from_dream(
+            souls, dc, cfg.clone(), seed, rng,
+            backend, smart_backend, run_log, souls_dir.clone(), is_test_run,
+        )?
+    } else {
+        World::new(
+            souls, cfg.clone(), seed, rng,
+            backend, smart_backend, run_log, souls_dir.clone(), is_test_run,
+        )?
+    };
     world.load_stories().await;
     world.summarize_journal_memories().await;
 
     let total_ticks = cli.ticks.unwrap_or(cfg.simulation.default_run_ticks);
 
     if cli.no_tui {
-        run_streaming(world, total_ticks, seed, &cli.llm, &cli.souls, &cfg).await
+        run_streaming(world, total_ticks, seed, &cli.llm, &souls_dir, &cfg).await
     } else {
         let god_queue = Arc::new(Mutex::new(VecDeque::new()));
-        run_tui(world, total_ticks, seed, &cli.llm, &cli.souls, &cfg, god_queue).await
+        run_tui(world, total_ticks, seed, &cli.llm, &souls_dir, &cfg, god_queue).await
     }
 }
 

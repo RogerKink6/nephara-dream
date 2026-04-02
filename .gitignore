@@ -15,3 +15,6 @@ souls/*.story.md
 souls/*.wishes.md
 souls/*.prayers.md
 souls/*.oracle_history.md
+
+# Auto-generated dream soul seeds
+souls/dream_souls/

@@ -340,6 +340,77 @@ impl World {
         })
     }
 
+    /// Construct a World from a dream config. Locations and agents come from the
+    /// JSON config rather than hardcoded village + soul seed files.
+    pub fn new_from_dream(
+        seeds:        Vec<SoulSeed>,
+        dream_cfg:    &crate::dream_config::DreamWorldConfig,
+        config:       Config,
+        seed:         u64,
+        rng:          StdRng,
+        llm:          Arc<dyn LlmBackend>,
+        llm_smart:    Arc<dyn LlmBackend>,
+        run_log:      RunLog,
+        souls_dir:    String,
+        is_test_run:  bool,
+    ) -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
+        if seeds.is_empty() {
+            return Err("dream config must define at least one NPC".into());
+        }
+        if seeds.len() > MAX_AGENTS {
+            return Err(format!(
+                "{} NPCs in dream config but maximum supported is {}",
+                seeds.len(), MAX_AGENTS
+            ).into());
+        }
+        let n_agents = seeds.len();
+
+        // Resolve initial positions for each agent from the dream config
+        let positions = crate::dream_config::resolve_all_positions(dream_cfg);
+
+        let agents = seeds.iter().enumerate()
+            .map(|(i, s)| {
+                let home = HOME_POSITIONS[i];
+                let mut agent = Agent::from_soul(i, s, &config, home);
+                // Override starting position if the config specified an initial_location
+                if let Some(&pos) = positions.get(&s.name) {
+                    agent.pos = pos;
+                }
+                agent
+            })
+            .collect();
+
+        let grid           = crate::dream_config::build_dream_grid(dream_cfg, n_agents);
+        let resource_nodes = build_resource_nodes(n_agents);
+
+        Ok(World {
+            tick_num: 0,
+            current_day: 1,
+            agents,
+            seed,
+            config,
+            run_log,
+            souls_dir,
+            notable_events: Vec::new(),
+            magic_count: 0,
+            magic_cast_this_day: vec![false; n_agents],
+            resource_nodes,
+            is_test_run,
+            pending_day_events: Vec::new(),
+            pending_llm_calls:  Vec::new(),
+            active_event: None,
+            pending_god_messages: Vec::new(),
+            pending_prayer_evals: Vec::new(),
+            token_echo: false,
+            tui_tx: None,
+            grid,
+            rng,
+            llm,
+            llm_smart,
+            llm_call_counter: 0,
+        })
+    }
+
     /// Enqueue god messages to be injected into this tick's prompts.
     pub fn inject_god_messages(&mut self, msgs: Vec<crate::tui_event::GodMessage>) {
         self.pending_god_messages.extend(msgs);
