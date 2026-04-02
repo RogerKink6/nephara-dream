@@ -357,3 +357,308 @@ pub fn resolve_all_positions(config: &DreamWorldConfig) -> HashMap<String, (u8, 
 
     positions
 }
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // -----------------------------------------------------------------------
+    // Config loading
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn load_dream_example_succeeds() {
+        let config = load("config/dream_example.json")
+            .expect("config/dream_example.json should load successfully");
+        assert_eq!(config.world.name, "The Shifting Isles");
+        assert_eq!(config.npcs.len(), 3);
+        assert!(config.leeloo.is_some());
+        assert!(config.dream_logic.is_some());
+    }
+
+    #[test]
+    fn load_nonexistent_file_errors() {
+        let result = load("config/nonexistent.json");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn load_rejects_invalid_attribute_sum() {
+        // Create a minimal JSON with bad attribute sum
+        let json = r#"{
+            "world": {"name": "Test"},
+            "locations": [],
+            "npcs": [{
+                "name": "Bad",
+                "vigor": 1, "wit": 1, "grace": 1, "heart": 1, "numen": 1,
+                "personality_prompt": "test"
+            }]
+        }"#;
+        let tmp = std::env::temp_dir().join("bad_attrs_test.json");
+        std::fs::write(&tmp, json).unwrap();
+        let result = load(tmp.to_str().unwrap());
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("attributes must sum to 30"), "error should mention attribute sum: {}", err);
+        std::fs::remove_file(&tmp).ok();
+    }
+
+    #[test]
+    fn load_rejects_missing_required_fields() {
+        // Missing "world" field
+        let json = r#"{"locations": [], "npcs": []}"#;
+        let tmp = std::env::temp_dir().join("missing_fields_test.json");
+        std::fs::write(&tmp, json).unwrap();
+        let result = load(tmp.to_str().unwrap());
+        assert!(result.is_err());
+        std::fs::remove_file(&tmp).ok();
+    }
+
+    // -----------------------------------------------------------------------
+    // npcs_to_seeds
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn npcs_to_seeds_correct_count_with_leeloo() {
+        let config = load("config/dream_example.json").unwrap();
+        let seeds = npcs_to_seeds(&config);
+        // 3 NPCs + 1 Leeloo = 4
+        assert_eq!(seeds.len(), 4, "should have 4 seeds (3 NPCs + Leeloo)");
+    }
+
+    #[test]
+    fn npcs_to_seeds_sorted_alphabetically() {
+        let config = load("config/dream_example.json").unwrap();
+        let seeds = npcs_to_seeds(&config);
+        let names: Vec<&str> = seeds.iter().map(|s| s.name.as_str()).collect();
+        let mut sorted = names.clone();
+        sorted.sort();
+        assert_eq!(names, sorted, "seeds should be sorted alphabetically");
+    }
+
+    #[test]
+    fn npcs_to_seeds_attributes_match_config() {
+        let config = load("config/dream_example.json").unwrap();
+        let seeds = npcs_to_seeds(&config);
+        // Find Vesper
+        let vesper = seeds.iter().find(|s| s.name == "Vesper").expect("Vesper should be in seeds");
+        assert_eq!(vesper.vigor, 4);
+        assert_eq!(vesper.wit, 8);
+        assert_eq!(vesper.grace, 6);
+        assert_eq!(vesper.heart, 5);
+        assert_eq!(vesper.numen, 7);
+    }
+
+    #[test]
+    fn npcs_to_seeds_leeloo_has_backend() {
+        let config = load("config/dream_example.json").unwrap();
+        let seeds = npcs_to_seeds(&config);
+        let leeloo = seeds.iter().find(|s| s.name == "Leeloo").expect("Leeloo should be in seeds");
+        assert_eq!(leeloo.backend.as_deref(), Some("hermes"), "Leeloo should have hermes backend");
+    }
+
+    #[test]
+    fn npcs_to_seeds_without_leeloo() {
+        let mut config = load("config/dream_example.json").unwrap();
+        config.leeloo = None;
+        let seeds = npcs_to_seeds(&config);
+        assert_eq!(seeds.len(), 3, "should have 3 seeds without Leeloo");
+        assert!(seeds.iter().all(|s| s.name != "Leeloo"));
+    }
+
+    #[test]
+    fn npc_to_seed_default_backstory() {
+        let npc = DreamNpc {
+            name: "TestNpc".to_string(),
+            archetype: Some("test".to_string()),
+            vigor: 6, wit: 6, grace: 6, heart: 6, numen: 6,
+            personality_prompt: "A test personality".to_string(),
+            backstory: None,
+            magical_affinity: None,
+            self_declaration: None,
+            initial_location: None,
+            backend: None,
+            specialty: None,
+        };
+        let seed = npc_to_seed(&npc);
+        assert!(seed.backstory.contains("TestNpc"), "default backstory should include NPC name");
+        assert!(seed.self_declaration.contains("TestNpc"), "default self-declaration should include NPC name");
+    }
+
+    #[test]
+    fn npc_to_seed_specialty_falls_back_to_archetype() {
+        let npc = DreamNpc {
+            name: "Test".to_string(),
+            archetype: Some("dream_weaver".to_string()),
+            vigor: 6, wit: 6, grace: 6, heart: 6, numen: 6,
+            personality_prompt: "test".to_string(),
+            backstory: None, magical_affinity: None, self_declaration: None,
+            initial_location: None, backend: None, specialty: None,
+        };
+        let seed = npc_to_seed(&npc);
+        assert_eq!(seed.specialty.as_deref(), Some("dream_weaver"));
+    }
+
+    // -----------------------------------------------------------------------
+    // build_dream_grid
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn build_dream_grid_valid_dimensions() {
+        let config = load("config/dream_example.json").unwrap();
+        let grid = build_dream_grid(&config, 4);
+        assert_eq!(grid.len(), GRID_H);
+        assert_eq!(grid[0].len(), GRID_W);
+    }
+
+    #[test]
+    fn build_dream_grid_locations_painted() {
+        let config = load("config/dream_example.json").unwrap();
+        let grid = build_dream_grid(&config, 4);
+        // Coral Library at position [10, 11] is a Temple
+        // Temple has half_w=2, half_h=2, so it should be at the center
+        assert_eq!(grid[11][10], TileType::Temple,
+            "Coral Library position should be Temple tile");
+    }
+
+    #[test]
+    fn build_dream_grid_homes_placed() {
+        let config = load("config/dream_example.json").unwrap();
+        let grid = build_dream_grid(&config, 4);
+        // Check that home tiles exist for 4 agents
+        for i in 0..4 {
+            let (hx, hy) = HOME_POSITIONS[i];
+            assert_eq!(grid[hy as usize][hx as usize], TileType::Home(i),
+                "Home tile for agent {} should exist at ({}, {})", i, hx, hy);
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // resolve_initial_position / resolve_all_positions
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn resolve_initial_position_matches_location() {
+        let config = load("config/dream_example.json").unwrap();
+        let vesper_npc = config.npcs.iter().find(|n| n.name == "Vesper").unwrap();
+        let pos = resolve_initial_position(vesper_npc, &config.locations, 0);
+        // Vesper's initial_location is "Coral Library" at [10, 11]
+        assert_eq!(pos, (10, 11), "Vesper should resolve to Coral Library position");
+    }
+
+    #[test]
+    fn resolve_initial_position_fallback_to_home() {
+        let config = load("config/dream_example.json").unwrap();
+        let npc = DreamNpc {
+            name: "NoLoc".to_string(),
+            archetype: None,
+            vigor: 6, wit: 6, grace: 6, heart: 6, numen: 6,
+            personality_prompt: "test".to_string(),
+            backstory: None, magical_affinity: None, self_declaration: None,
+            initial_location: None, backend: None, specialty: None,
+        };
+        let pos = resolve_initial_position(&npc, &config.locations, 2);
+        assert_eq!(pos, HOME_POSITIONS[2], "should fall back to home position for agent index 2");
+    }
+
+    #[test]
+    fn resolve_all_positions_has_all_npcs() {
+        let config = load("config/dream_example.json").unwrap();
+        let positions = resolve_all_positions(&config);
+        assert_eq!(positions.len(), 4, "should have 4 positions (3 NPCs + Leeloo)");
+        assert!(positions.contains_key("Vesper"));
+        assert!(positions.contains_key("Ondra"));
+        assert!(positions.contains_key("Thren"));
+        assert!(positions.contains_key("Leeloo"));
+    }
+
+    // -----------------------------------------------------------------------
+    // write_soul_seeds (round-trip)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn write_soul_seeds_creates_parseable_files() {
+        let config = load("config/dream_example.json").unwrap();
+        let seeds = npcs_to_seeds(&config);
+        let tmp_dir = std::env::temp_dir().join("dream_test_souls");
+        let _ = std::fs::remove_dir_all(&tmp_dir);
+
+        write_soul_seeds(&seeds, tmp_dir.to_str().unwrap())
+            .expect("write_soul_seeds should succeed");
+
+        // Verify each written file can be re-parsed
+        for seed in &seeds {
+            let filename = format!("{}.seed.md", seed.name.to_lowercase());
+            let path = tmp_dir.join(&filename);
+            assert!(path.exists(), "seed file {} should exist", filename);
+
+            let content = std::fs::read_to_string(&path).unwrap();
+            let parsed = crate::soul::parse(&content)
+                .unwrap_or_else(|e| panic!("written seed for {} should re-parse: {}", seed.name, e));
+            assert_eq!(parsed.name, seed.name);
+            assert_eq!(parsed.vigor, seed.vigor);
+            assert_eq!(parsed.wit, seed.wit);
+            assert_eq!(parsed.grace, seed.grace);
+            assert_eq!(parsed.heart, seed.heart);
+            assert_eq!(parsed.numen, seed.numen);
+        }
+
+        std::fs::remove_dir_all(&tmp_dir).ok();
+    }
+
+    // -----------------------------------------------------------------------
+    // parse_tile_type
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn parse_tile_type_all_variants() {
+        assert_eq!(parse_tile_type("forest"), TileType::Forest);
+        assert_eq!(parse_tile_type("river"), TileType::River);
+        assert_eq!(parse_tile_type("square"), TileType::Square);
+        assert_eq!(parse_tile_type("tavern"), TileType::Tavern);
+        assert_eq!(parse_tile_type("well"), TileType::Well);
+        assert_eq!(parse_tile_type("meadow"), TileType::Meadow);
+        assert_eq!(parse_tile_type("temple"), TileType::Temple);
+        assert_eq!(parse_tile_type("unknown"), TileType::Open);
+    }
+
+    #[test]
+    fn parse_tile_type_case_insensitive() {
+        assert_eq!(parse_tile_type("Forest"), TileType::Forest);
+        assert_eq!(parse_tile_type("TAVERN"), TileType::Tavern);
+    }
+
+    // -----------------------------------------------------------------------
+    // validate_attrs
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn validate_attrs_accepts_sum_30() {
+        assert!(validate_attrs("Test", 6, 6, 6, 6, 6).is_ok());
+    }
+
+    #[test]
+    fn validate_attrs_rejects_sum_not_30() {
+        assert!(validate_attrs("Bad", 1, 1, 1, 1, 1).is_err());
+        assert!(validate_attrs("Bad", 10, 10, 10, 10, 10).is_err());
+    }
+
+    // -----------------------------------------------------------------------
+    // DreamLogicConfig defaults
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn dream_logic_config_default_values() {
+        let config = DreamLogicConfig::default();
+        assert!((config.intensity - 0.7).abs() < f64::EPSILON);
+        assert!((config.scene_shift_chance - 0.15).abs() < f64::EPSILON);
+        assert!((config.distance_fluidity - 0.5).abs() < f64::EPSILON);
+        assert!(config.emotional_causality);
+        assert!((config.transformation_chance - 0.1).abs() < f64::EPSILON);
+        assert!(config.time_dilation.is_some());
+    }
+}

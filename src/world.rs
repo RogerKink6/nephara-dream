@@ -4586,6 +4586,102 @@ mod tests {
             "tick result should have one entry per agent, got {}", result.entries.len());
     }
 
+    // -----------------------------------------------------------------------
+    // Phase 1: Dream world integration tests
+    // -----------------------------------------------------------------------
+
+    fn dream_world() -> World {
+        let dream_cfg = crate::dream_config::load("config/dream_example.json")
+            .expect("dream config should load");
+        let seeds = crate::dream_config::npcs_to_seeds(&dream_cfg);
+        let config = crate::config::load("config/world.toml").expect("config should load");
+        let rng = StdRng::seed_from_u64(42);
+        let mock = Arc::new(crate::llm::MockBackend::new(StdRng::seed_from_u64(42)));
+        let run_log = crate::log::RunLog::new_test();
+        World::new_from_dream(
+            seeds, &dream_cfg, config, 42, rng,
+            mock.clone(), mock, run_log, "souls".to_string(), true,
+        ).expect("dream world should construct")
+    }
+
+    #[test]
+    fn dream_world_correct_agent_count() {
+        let world = dream_world();
+        // 3 NPCs + 1 Leeloo = 4
+        assert_eq!(world.agents.len(), 4, "dream world should have 4 agents");
+    }
+
+    #[test]
+    fn dream_world_has_dream_state() {
+        let world = dream_world();
+        assert!(world.dream_state.is_some(), "dream world should have dream_state");
+        assert!(world.dream_logic_config.is_some(), "dream world should have dream_logic_config");
+    }
+
+    #[test]
+    fn dream_world_state_initializes_correctly() {
+        let world = dream_world();
+        let state = world.dream_state.as_ref().unwrap();
+        assert_eq!(state.emotion, crate::dream_logic::DreamEmotion::Neutral);
+        assert_eq!(state.phase, crate::dream_logic::DreamPhase::Early);
+        assert!(state.transformations.is_empty());
+    }
+
+    #[test]
+    fn dream_world_perception_block_generated() {
+        let world = dream_world();
+        let perception = world.build_dream_perception_block();
+        assert!(!perception.is_empty(), "dream perception block should not be empty");
+        assert!(perception.contains("DREAM STATE:"), "perception should contain DREAM STATE");
+    }
+
+    #[test]
+    fn dream_world_set_total_ticks() {
+        let mut world = dream_world();
+        world.set_total_ticks(100);
+        let state = world.dream_state.as_ref().unwrap();
+        assert_eq!(state.total_ticks, 100);
+    }
+
+    #[test]
+    fn dream_world_agent_names_include_leeloo() {
+        let world = dream_world();
+        let names: Vec<&str> = world.agents.iter().map(|a| a.identity.name.as_str()).collect();
+        assert!(names.contains(&"Leeloo"), "dream world should include Leeloo agent");
+        assert!(names.contains(&"Vesper"), "dream world should include Vesper agent");
+        assert!(names.contains(&"Ondra"), "dream world should include Ondra agent");
+        assert!(names.contains(&"Thren"), "dream world should include Thren agent");
+    }
+
+    #[test]
+    fn dream_world_without_dream_logic_section() {
+        let mut dream_cfg = crate::dream_config::load("config/dream_example.json").unwrap();
+        dream_cfg.dream_logic = None; // remove dream logic
+        let seeds = crate::dream_config::npcs_to_seeds(&dream_cfg);
+        let config = crate::config::load("config/world.toml").unwrap();
+        let rng = StdRng::seed_from_u64(42);
+        let mock = Arc::new(crate::llm::MockBackend::new(StdRng::seed_from_u64(42)));
+        let run_log = crate::log::RunLog::new_test();
+        let world = World::new_from_dream(
+            seeds, &dream_cfg, config, 42, rng,
+            mock.clone(), mock, run_log, "souls".to_string(), true,
+        ).unwrap();
+        assert!(world.dream_state.is_none(), "no dream_logic section => no dream_state");
+        assert!(world.dream_logic_config.is_none(), "no dream_logic section => no config");
+        let perception = world.build_dream_perception_block();
+        assert!(perception.is_empty(), "no dream logic => empty perception");
+    }
+
+    #[tokio::test]
+    async fn dream_world_smoke_ticks() {
+        let mut world = dream_world();
+        world.set_total_ticks(10);
+        for _ in 0..3 {
+            world.tick().await.expect("dream world tick should not error");
+        }
+        assert_eq!(world.tick_num, 3);
+    }
+
     #[tokio::test]
     async fn smoke_needs_hunger_decays_each_tick() {
         let mut world = minimal_world(1);

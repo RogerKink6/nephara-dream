@@ -145,6 +145,55 @@ mod tests {
         let content = "---\nname: Bad\nvigor: 1\nwit: 1\ngrace: 1\nheart: 1\nnumen: 1\n---\n";
         assert!(parse(content).is_err(), "should reject attribute sum != 30");
     }
+
+    // -----------------------------------------------------------------------
+    // Phase 1: Leeloo soul seed parsing
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn parse_leeloo_seed_file() {
+        let content = std::fs::read_to_string("souls/leeloo.seed.md")
+            .expect("souls/leeloo.seed.md should exist");
+        let soul = parse(&content).expect("leeloo.seed.md should parse");
+        assert_eq!(soul.name, "Leeloo");
+        assert_eq!(soul.vigor + soul.wit + soul.grace + soul.heart + soul.numen, 30);
+        assert!(!soul.personality.is_empty());
+        assert!(!soul.backstory.is_empty());
+        assert!(!soul.magical_affinity.is_empty());
+        assert!(!soul.self_declaration.is_empty());
+    }
+
+    #[test]
+    fn parse_leeloo_backend_field() {
+        let content = std::fs::read_to_string("souls/leeloo.seed.md")
+            .expect("souls/leeloo.seed.md should exist");
+        let soul = parse(&content).expect("leeloo.seed.md should parse");
+        assert_eq!(soul.backend.as_deref(), Some("hermes"),
+            "Leeloo should have backend 'hermes'");
+    }
+
+    #[test]
+    fn parse_seed_without_backend_field() {
+        let content = "---\nname: NoBE\nvigor: 6\nwit: 6\ngrace: 6\nheart: 6\nnumen: 6\n---\n## Personality\nQuiet.\n## Backstory\nNone.\n## Magical Affinity\nNone.\n## Self-Declaration\nI am NoBE.";
+        let soul = parse(content).expect("seed without backend should parse");
+        assert!(soul.backend.is_none(), "backend should be None when not specified");
+    }
+
+    #[test]
+    fn parse_seed_with_backend_field() {
+        let content = "---\nname: WithBE\nvigor: 6\nwit: 6\ngrace: 6\nheart: 6\nnumen: 6\nbackend: \"ollama\"\n---\n## Personality\nQuiet.\n## Backstory\nNone.\n## Magical Affinity\nNone.\n## Self-Declaration\nI am WithBE.";
+        let soul = parse(content).expect("seed with backend should parse");
+        assert_eq!(soul.backend.as_deref(), Some("ollama"));
+    }
+
+    #[test]
+    fn load_all_includes_leeloo() {
+        let souls = load_all("souls").expect("souls/ should load");
+        let leeloo = souls.iter().find(|s| s.name == "Leeloo");
+        assert!(leeloo.is_some(), "Leeloo should be in loaded souls");
+        let leeloo = leeloo.unwrap();
+        assert_eq!(leeloo.backend.as_deref(), Some("hermes"));
+    }
 }
 
 fn parse_sections(body: &str) -> HashMap<String, String> {

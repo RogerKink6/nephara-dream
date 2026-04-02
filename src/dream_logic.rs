@@ -691,4 +691,294 @@ mod tests {
         let perception = build_dream_perception(&config, &state);
         assert!(perception.is_empty());
     }
+
+    // -----------------------------------------------------------------------
+    // Phase 1 audit: additional dream logic tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_dream_phase_zero_total_ticks() {
+        // Edge case: total_ticks == 0 should return Middle
+        assert_eq!(DreamPhase::from_progress(0, 0), DreamPhase::Middle);
+        assert_eq!(DreamPhase::from_progress(50, 0), DreamPhase::Middle);
+    }
+
+    #[test]
+    fn test_dream_phase_boundary_values() {
+        // Exactly at boundaries
+        assert_eq!(DreamPhase::from_progress(24, 100), DreamPhase::Early);  // 0.24 < 0.25
+        assert_eq!(DreamPhase::from_progress(25, 100), DreamPhase::Middle); // 0.25 >= 0.25
+        assert_eq!(DreamPhase::from_progress(74, 100), DreamPhase::Middle); // 0.74 < 0.75
+        assert_eq!(DreamPhase::from_progress(75, 100), DreamPhase::Late);   // 0.75 >= 0.75
+    }
+
+    #[test]
+    fn test_dream_phase_intensity_multiplier() {
+        assert!((DreamPhase::Early.intensity_multiplier() - 0.5).abs() < f64::EPSILON);
+        assert!((DreamPhase::Middle.intensity_multiplier() - 1.0).abs() < f64::EPSILON);
+        assert!((DreamPhase::Late.intensity_multiplier() - 0.6).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn test_dream_phase_labels() {
+        assert_eq!(DreamPhase::Early.label(), "early");
+        assert_eq!(DreamPhase::Middle.label(), "middle");
+        assert_eq!(DreamPhase::Late.label(), "late");
+    }
+
+    #[test]
+    fn test_emotional_causality_different_emotions_different_output() {
+        let mut rng = StdRng::seed_from_u64(42);
+        let phase = DreamPhase::Middle;
+
+        let fear_atmo = emotional_atmosphere(DreamEmotion::Fear, phase, &mut rng);
+        let mut rng2 = StdRng::seed_from_u64(42);
+        let joy_atmo = emotional_atmosphere(DreamEmotion::Joy, phase, &mut rng2);
+
+        // Fear and Joy should produce different descriptions
+        assert!(!fear_atmo.is_empty(), "Fear should produce atmosphere");
+        assert!(!joy_atmo.is_empty(), "Joy should produce atmosphere");
+        assert_ne!(fear_atmo[0], joy_atmo[0], "Fear and Joy atmospheres should differ");
+    }
+
+    #[test]
+    fn test_emotional_atmosphere_all_emotions_produce_output() {
+        let emotions = [
+            DreamEmotion::Fear,
+            DreamEmotion::Joy,
+            DreamEmotion::Confusion,
+            DreamEmotion::Anger,
+            DreamEmotion::Sadness,
+            DreamEmotion::Wonder,
+        ];
+        for emotion in &emotions {
+            let mut rng = StdRng::seed_from_u64(42);
+            let atmo = emotional_atmosphere(*emotion, DreamPhase::Middle, &mut rng);
+            assert!(!atmo.is_empty(), "{:?} should produce at least one atmosphere descriptor", emotion);
+        }
+    }
+
+    #[test]
+    fn test_scene_shift_deterministic_with_seed() {
+        let config = DreamLogicConfig {
+            intensity: 1.0,
+            scene_shift_chance: 1.0, // force trigger
+            ..test_config()
+        };
+        let mut state1 = DreamState::new(100);
+        state1.scene_shift_cooldown = 0;
+        state1.phase = DreamPhase::Middle;
+        let mut rng1 = StdRng::seed_from_u64(123);
+
+        let mut state2 = DreamState::new(100);
+        state2.scene_shift_cooldown = 0;
+        state2.phase = DreamPhase::Middle;
+        let mut rng2 = StdRng::seed_from_u64(123);
+
+        let result1 = check_scene_shift(&config, &mut state1, 5, 5, 0, &mut rng1);
+        let result2 = check_scene_shift(&config, &mut state2, 5, 5, 0, &mut rng2);
+
+        assert_eq!(result1.is_some(), result2.is_some(), "same seed should give same result");
+        if let (Some((narr1, idx1)), Some((narr2, idx2))) = (&result1, &result2) {
+            assert_eq!(narr1, narr2, "same seed should give same narrative");
+            assert_eq!(idx1, idx2, "same seed should give same target index");
+        }
+    }
+
+    #[test]
+    fn test_scene_shift_single_location_returns_none() {
+        let config = DreamLogicConfig {
+            intensity: 1.0,
+            scene_shift_chance: 1.0,
+            ..test_config()
+        };
+        let mut state = DreamState::new(100);
+        state.scene_shift_cooldown = 0;
+        state.phase = DreamPhase::Middle;
+        let mut rng = StdRng::seed_from_u64(42);
+
+        // Only 1 location means we can't shift to a different one
+        let result = check_scene_shift(&config, &mut state, 1, 1, 0, &mut rng);
+        assert!(result.is_none(), "scene shift with 1 location should return None");
+    }
+
+    #[test]
+    fn test_transformation_produces_valid_output() {
+        let config = DreamLogicConfig {
+            intensity: 1.0,
+            transformation_chance: 1.0,
+            ..test_config()
+        };
+        let mut state = DreamState::new(100);
+        state.phase = DreamPhase::Middle;
+        let mut rng = StdRng::seed_from_u64(42);
+
+        let names = vec!["Alice".to_string(), "Bob".to_string()];
+        let result = check_transformation(&config, &mut state, 10, &names, &mut rng);
+        assert!(result.is_some(), "forced transformation should produce result");
+        let t = result.unwrap();
+        assert!(t.description.contains("DREAM TRANSFORM"), "description should contain DREAM TRANSFORM marker");
+        assert!(t.tick == 10);
+        // Either NPC or object transform
+        assert!(t.npc_change.is_some() || t.location_change.is_some(),
+            "transformation should have either npc_change or location_change");
+    }
+
+    #[test]
+    fn test_transformation_with_no_npcs_is_always_object() {
+        let config = DreamLogicConfig {
+            intensity: 1.0,
+            transformation_chance: 1.0,
+            ..test_config()
+        };
+        let mut state = DreamState::new(100);
+        state.phase = DreamPhase::Middle;
+        let mut rng = StdRng::seed_from_u64(42);
+
+        let result = check_transformation(&config, &mut state, 5, &[], &mut rng);
+        assert!(result.is_some());
+        let t = result.unwrap();
+        assert!(t.npc_change.is_none(), "with no NPCs, should be object transform");
+        assert!(t.location_change.is_some());
+    }
+
+    #[test]
+    fn test_dream_state_new_initializes_correctly() {
+        let state = DreamState::new(50);
+        assert_eq!(state.total_ticks, 50);
+        assert_eq!(state.emotion, DreamEmotion::Neutral);
+        assert_eq!(state.phase, DreamPhase::Early);
+        assert_eq!(state.scene_shift_cooldown, 3);
+        assert!(state.transformations.is_empty());
+        assert!((state.time_dilation_factor - 1.0).abs() < f64::EPSILON);
+        assert!(state.tick_narratives.is_empty());
+        assert!(state.atmosphere_modifiers.is_empty());
+        assert!(state.distance_warps.is_empty());
+    }
+
+    #[test]
+    fn test_dream_state_begin_tick_clears() {
+        let mut state = DreamState::new(100);
+        state.tick_narratives.push("test".to_string());
+        state.atmosphere_modifiers.push("mod".to_string());
+        state.distance_warps.insert("loc".to_string(), 1.5);
+
+        state.begin_tick();
+
+        assert!(state.tick_narratives.is_empty());
+        assert!(state.atmosphere_modifiers.is_empty());
+        assert!(state.distance_warps.is_empty());
+    }
+
+    #[test]
+    fn test_dream_state_update_phase() {
+        let mut state = DreamState::new(100);
+        state.update_phase(10);
+        assert_eq!(state.phase, DreamPhase::Early);
+        state.update_phase(50);
+        assert_eq!(state.phase, DreamPhase::Middle);
+        state.update_phase(80);
+        assert_eq!(state.phase, DreamPhase::Late);
+    }
+
+    #[test]
+    fn test_warp_distance_minimum_one() {
+        let config = test_config();
+        let state = DreamState::new(100);
+        let mut rng = StdRng::seed_from_u64(42);
+
+        // Even with actual_distance = 0, result should be >= 1
+        let result = warp_distance(&config, &state, (0, 0), (0, 0), 0, &mut rng);
+        assert!(result >= 1, "warped distance should be at least 1, got {}", result);
+    }
+
+    #[test]
+    fn test_time_dilation_disabled() {
+        let config = DreamLogicConfig {
+            time_dilation: None,
+            ..test_config()
+        };
+        let mut state = DreamState::new(100);
+        let mut rng = StdRng::seed_from_u64(42);
+
+        let result = apply_time_dilation(&config, &mut state, &mut rng);
+        assert!(result.is_none(), "disabled time dilation should produce None");
+        assert!((state.time_dilation_factor - 1.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn test_build_dream_perception_includes_phase() {
+        let config = test_config();
+        let mut state = DreamState::new(100);
+        state.phase = DreamPhase::Middle;
+
+        let perception = build_dream_perception(&config, &state);
+        assert!(perception.contains("DREAM STATE:"), "perception should contain DREAM STATE header");
+        assert!(perception.contains("middle"), "perception should contain phase label");
+    }
+
+    #[test]
+    fn test_build_dream_perception_includes_emotion() {
+        let config = test_config();
+        let mut state = DreamState::new(100);
+        state.emotion = DreamEmotion::Fear;
+
+        let perception = build_dream_perception(&config, &state);
+        assert!(perception.contains("Fear"), "perception should mention Fear emotion");
+    }
+
+    #[test]
+    fn test_build_dream_perception_includes_time_dilation() {
+        let config = test_config();
+        let mut state = DreamState::new(100);
+        state.time_dilation_factor = 0.5; // very slow
+
+        let perception = build_dream_perception(&config, &state);
+        assert!(perception.contains("Time feels stretched"), "perception should describe slow time");
+    }
+
+    #[test]
+    fn test_build_dream_perception_includes_recent_transforms() {
+        let config = test_config();
+        let mut state = DreamState::new(100);
+        state.transformations.push(Transformation {
+            tick: 5,
+            description: "A test transformation occurred".to_string(),
+            npc_change: None,
+            location_change: Some("test".to_string()),
+        });
+
+        let perception = build_dream_perception(&config, &state);
+        assert!(perception.contains("Recent dream shifts"), "perception should include recent transforms");
+        assert!(perception.contains("A test transformation occurred"));
+    }
+
+    #[test]
+    fn test_emotion_detect_mixed_signals_picks_strongest() {
+        // Text with multiple emotion words — should pick the one with most matches
+        let text = "I feel afraid, dread fills me with terror and panic in the dark shadows";
+        assert_eq!(DreamEmotion::detect(text), DreamEmotion::Fear);
+    }
+
+    #[test]
+    fn test_fluid_distance_emotion_affects_multiplier() {
+        let config = test_config();
+        let mut rng1 = StdRng::seed_from_u64(99);
+        let mut rng2 = StdRng::seed_from_u64(99);
+
+        let mut state_fear = DreamState::new(100);
+        state_fear.emotion = DreamEmotion::Fear;
+        state_fear.phase = DreamPhase::Middle;
+
+        let mut state_confusion = DreamState::new(100);
+        state_confusion.emotion = DreamEmotion::Confusion;
+        state_confusion.phase = DreamPhase::Middle;
+
+        let mult_fear = fluid_distance_multiplier(&config, &state_fear, (5, 5), (10, 10), &mut rng1);
+        let mult_conf = fluid_distance_multiplier(&config, &state_confusion, (5, 5), (10, 10), &mut rng2);
+
+        // Fear pulls closer (factor 0.7), confusion stretches (factor 1.3)
+        // They should differ given the same RNG seed
+        assert!(mult_fear < mult_conf, "Fear ({}) should give smaller multiplier than Confusion ({})", mult_fear, mult_conf);
+    }
 }
