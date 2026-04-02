@@ -274,6 +274,10 @@ pub struct World {
     pub token_echo:          bool,
     /// When Some (TUI mode), send PartialToken events to the TUI.
     pub tui_tx:              Option<tokio::sync::mpsc::Sender<TuiEvent>>,
+    /// Dream logic state — only active when a dream config with dream_logic is loaded.
+    pub dream_state:         Option<crate::dream_logic::DreamState>,
+    /// Dream logic config — only present when dream_logic section is in the config.
+    pub dream_logic_config:  Option<crate::dream_config::DreamLogicConfig>,
     grid:                    [[TileType; GRID_W]; GRID_H],
     rng:                     StdRng,
     llm:                     Arc<dyn LlmBackend>,
@@ -332,6 +336,8 @@ impl World {
             pending_prayer_evals: Vec::new(),
             token_echo: false,
             tui_tx: None,
+            dream_state: None,
+            dream_logic_config: None,
             grid,
             rng,
             llm,
@@ -383,6 +389,15 @@ impl World {
         let grid           = crate::dream_config::build_dream_grid(dream_cfg, n_agents);
         let resource_nodes = build_resource_nodes(n_agents);
 
+        // Initialize dream logic if the config has a dream_logic section
+        let dream_logic_config = dream_cfg.dream_logic.clone();
+        let dream_state = if dream_logic_config.is_some() {
+            // total_ticks will be updated when we know the run length; use 0 as placeholder
+            Some(crate::dream_logic::DreamState::new(0))
+        } else {
+            None
+        };
+
         Ok(World {
             tick_num: 0,
             current_day: 1,
@@ -403,12 +418,21 @@ impl World {
             pending_prayer_evals: Vec::new(),
             token_echo: false,
             tui_tx: None,
+            dream_state,
+            dream_logic_config,
             grid,
             rng,
             llm,
             llm_smart,
             llm_call_counter: 0,
         })
+    }
+
+    /// Set the total ticks for dream state phase calculation.
+    pub fn set_total_ticks(&mut self, total: u32) {
+        if let Some(ref mut ds) = self.dream_state {
+            ds.total_ticks = total;
+        }
     }
 
     /// Enqueue god messages to be injected into this tick's prompts.
@@ -582,6 +606,104 @@ impl World {
         }
     }
 
+    // -----------------------------------------------------------------------
+    // Dream logic processing (Issue #2)
+    // -----------------------------------------------------------------------
+
+    /// Called at the start of each tick to initialize dream logic state for this tick.
+    fn process_dream_logic_begin(&mut self, tick: u32) {
+        let config = match &self.dream_logic_config {
+            Some(c) => c.clone(),
+            None => return,
+        };
+
+        if let Some(ref mut state) = self.dream_state {
+            state.begin_tick();
+            state.update_phase(tick);
+
+            // Detect emotion from the most recent agent action (first agent's last memory as proxy)
+            if config.emotional_causality {
+                let last_text: String = self.agents.iter()
+                    .filter_map(|a| a.memory.front().cloned())
+                    .collect::<Vec<_>>()
+                    .join(" ");
+                state.emotion = crate::dream_logic::DreamEmotion::detect(&last_text);
+            }
+
+            // Apply time dilation
+            crate::dream_logic::apply_time_dilation(&config, state, &mut self.rng);
+
+            // Generate emotional atmosphere
+            let atmosphere = crate::dream_logic::emotional_atmosphere(
+                state.emotion, state.phase, &mut self.rng
+            );
+            state.atmosphere_modifiers = atmosphere;
+
+            // Check for scene shift — teleport a random non-busy agent
+            let num_locations = 7; // approximate number of distinct locations
+            // Use first agent's position as reference for current location
+            let current_loc_idx = if !self.agents.is_empty() {
+                (self.agents[0].pos.0 as usize + self.agents[0].pos.1 as usize) % num_locations
+            } else {
+                0
+            };
+            if let Some((narrative, _target_idx)) = crate::dream_logic::check_scene_shift(
+                &config, state, tick, num_locations, current_loc_idx, &mut self.rng
+            ) {
+                // Teleport a random agent to a random position (simulating scene shift)
+                if !self.agents.is_empty() {
+                    let agent_idx = self.rng.gen_range(0..self.agents.len());
+                    // Pick a random valid location on the grid
+                    let new_x = self.rng.gen_range(2u8..28);
+                    let new_y = self.rng.gen_range(2u8..28);
+                    self.agents[agent_idx].pos = (new_x, new_y);
+                    // Add scene shift narrative to agent's memory
+                    let name = self.agents[agent_idx].name().to_string();
+                    self.agents[agent_idx].push_memory(
+                        narrative.clone(),
+                        self.config.memory.buffer_size,
+                    );
+                    debug!(target: "dream", agent = %name, "Scene shift: teleported to ({}, {})", new_x, new_y);
+                }
+            }
+        }
+    }
+
+    /// Called after all agents have been processed this tick.
+    fn process_dream_logic_end(&mut self, tick: u32) {
+        let config = match &self.dream_logic_config {
+            Some(c) => c.clone(),
+            None => return,
+        };
+
+        if let Some(ref mut state) = self.dream_state {
+            // Check for transformations
+            let npc_names: Vec<String> = self.agents.iter().map(|a| a.name().to_string()).collect();
+            if let Some(transform) = crate::dream_logic::check_transformation(
+                &config, state, tick, &npc_names, &mut self.rng
+            ) {
+                // Add transformation narrative to all agents' memories
+                for agent in &mut self.agents {
+                    agent.push_memory(
+                        transform.description.clone(),
+                        self.config.memory.buffer_size,
+                    );
+                }
+                debug!(target: "dream", "Transformation: {}", transform.description);
+            }
+        }
+    }
+
+    /// Build the dream perception block for injection into agent prompts.
+    fn build_dream_perception_block(&self) -> String {
+        match (&self.dream_logic_config, &self.dream_state) {
+            (Some(config), Some(state)) => {
+                crate::dream_logic::build_dream_perception(config, state)
+            }
+            _ => String::new(),
+        }
+    }
+
     /// Build a token streaming sender for the current agent's main action LLM call.
     /// Returns None if streaming is disabled. When Some, the spawned task forwards
     /// tokens to stdout (no-tui mode) or to the TUI as PartialToken events (TUI mode).
@@ -681,6 +803,9 @@ impl World {
         // FEAT-19: roll for and apply world events
         self.process_world_events(tick, day, tod);
 
+        // --- Dream logic: begin tick processing ---
+        self.process_dream_logic_begin(tick);
+
         let mut order: Vec<usize> = (0..self.agents.len()).collect();
         order.shuffle(&mut self.rng);
 
@@ -690,6 +815,9 @@ impl World {
             let entry = self.process_agent(idx, tick, day, is_night, tod).await?;
             entries.push(entry);
         }
+
+        // --- Dream logic: post-agent processing (transformations, emotional causality) ---
+        self.process_dream_logic_end(tick);
 
         // Batch evaluate prayers queued this tick
         if !self.pending_prayer_evals.is_empty() {
@@ -2285,6 +2413,9 @@ impl World {
             format!("\nBONDS:\n{}\n", combined.join("\n"))
         };
 
+        // Dream logic perception block (Issue #2)
+        let dream_block = self.build_dream_perception_block();
+
         // FEAT-19: world event note for prompt
         let event_note = match self.active_event.as_ref() {
             Some(ev) if ev.kind == WorldEventKind::Storm =>
@@ -2423,7 +2554,7 @@ CURRENT STATE:
 - Social:   {social:.0}/100  (100=connected, 0=lonely)
 - Hygiene:  {hygiene:.0}/100  (100=clean, 0=filthy){inventory_line}
 {warnings}{god_block}
-NEARBY: {nearby}{affinity_block}{beliefs_block}{event_note}
+NEARBY: {nearby}{affinity_block}{beliefs_block}{event_note}{dream_block}
 VIEWPORT (you are [X]):
 {viewport}
 (legend: F=Forest ~=River S=Square V=Tavern W=Well M=Meadow h=Home P=Temple X=you)
@@ -2469,6 +2600,7 @@ Choose ONE action. Respond with ONLY a JSON object:
             affinity_block   = affinity_block,
             beliefs_block    = beliefs_block,
             event_note       = event_note,
+            dream_block      = dream_block,
             viewport         = viewport,
             region_note      = region_note,
             memory           = memory_block,

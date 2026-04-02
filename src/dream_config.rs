@@ -21,6 +21,68 @@ pub struct DreamWorldConfig {
     pub npcs:              Vec<DreamNpc>,
     pub leeloo:            Option<DreamNpc>,
     pub initial_situation: Option<String>,
+    pub dream_logic:       Option<DreamLogicConfig>,
+}
+
+// ---------------------------------------------------------------------------
+// Dream logic configuration
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct DreamLogicConfig {
+    /// 0.0 = normal world, 1.0 = full surreal
+    #[serde(default = "default_intensity")]
+    pub intensity: f64,
+    /// Per-tick chance of abrupt scene change
+    #[serde(default = "default_scene_shift_chance")]
+    pub scene_shift_chance: f64,
+    /// How much distances warp (0.0 = stable, 1.0 = very fluid)
+    #[serde(default = "default_distance_fluidity")]
+    pub distance_fluidity: f64,
+    /// Whether emotions affect world descriptions
+    #[serde(default = "default_emotional_causality")]
+    pub emotional_causality: bool,
+    /// Per-tick chance of NPC/object transformation
+    #[serde(default = "default_transformation_chance")]
+    pub transformation_chance: f64,
+    /// Time dilation settings
+    pub time_dilation: Option<TimeDilationConfig>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct TimeDilationConfig {
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    #[serde(default = "default_min_factor")]
+    pub min_factor: f64,
+    #[serde(default = "default_max_factor")]
+    pub max_factor: f64,
+}
+
+fn default_intensity() -> f64 { 0.7 }
+fn default_scene_shift_chance() -> f64 { 0.15 }
+fn default_distance_fluidity() -> f64 { 0.5 }
+fn default_emotional_causality() -> bool { true }
+fn default_transformation_chance() -> f64 { 0.1 }
+fn default_true() -> bool { true }
+fn default_min_factor() -> f64 { 0.5 }
+fn default_max_factor() -> f64 { 2.0 }
+
+impl Default for DreamLogicConfig {
+    fn default() -> Self {
+        DreamLogicConfig {
+            intensity: default_intensity(),
+            scene_shift_chance: default_scene_shift_chance(),
+            distance_fluidity: default_distance_fluidity(),
+            emotional_causality: default_emotional_causality(),
+            transformation_chance: default_transformation_chance(),
+            time_dilation: Some(TimeDilationConfig {
+                enabled: true,
+                min_factor: default_min_factor(),
+                max_factor: default_max_factor(),
+            }),
+        }
+    }
 }
 
 #[derive(Debug, Deserialize)]

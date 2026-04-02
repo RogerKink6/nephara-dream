@@ -4,6 +4,7 @@ mod bench;
 mod color;
 mod config;
 mod dream_config;
+mod dream_logic;
 mod llm;
 mod log;
 mod magic;
@@ -334,6 +335,7 @@ async fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     world.summarize_journal_memories().await;
 
     let total_ticks = cli.ticks.unwrap_or(cfg.simulation.default_run_ticks);
+    world.set_total_ticks(total_ticks);
 
     if cli.no_tui {
         run_streaming(world, total_ticks, seed, &cli.llm, &souls_dir, &cfg).await
