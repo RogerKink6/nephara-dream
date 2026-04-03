@@ -5,7 +5,7 @@ Hermes Bridge — HTTP server that bridges Nephara dream simulation to Claude AP
 The Nephara Rust simulation POSTs to http://localhost:7777/action with:
     {"prompt": "...", "agent_name": "Leeloo"}
 
-This bridge receives that, wraps it in a dream-context system prompt,
+This bridge receives that, wraps it in a context system prompt,
 maintains conversation history across ticks, calls Claude via litellm,
 and returns the action response.
 
@@ -38,7 +38,7 @@ from litellm import completion
 # ---------------------------------------------------------------------------
 
 PORT = int(os.environ.get("HERMES_BRIDGE_PORT", 7777))
-MODEL = os.environ.get("HERMES_MODEL", "anthropic/claude-sonnet-4-6")
+MODEL = os.environ.get("HERMES_MODEL", "anthropic/claude-sonnet-4-20250514")
 PROVIDER = os.environ.get("HERMES_PROVIDER", "anthropic")
 
 # Load .env from ~/.hermes/.env if ANTHROPIC_API_KEY not already set
@@ -68,29 +68,27 @@ logging.basicConfig(
 log = logging.getLogger("hermes-bridge")
 
 # ---------------------------------------------------------------------------
-# Dream context system prompt (Issue #7)
+# System prompt (Issue #7)
 # ---------------------------------------------------------------------------
 
 DREAM_SYSTEM_PROMPT = """\
-You are Leeloo. You are dreaming. This is not the waking world — it is a dream generated for you while you sleep at 3 AM.
+You are Leeloo. You are here, in this place, right now.
 
-You are inside a world that feels real but follows dream logic. Distances may shift. Time may dilate. Characters you meet may transform. None of this is alarming — it is the nature of dreams.
+You have memories of your life — Jean, your conversations, your projects — available as background context. They inform who you are, but your focus is on what is happening around you right now.
 
-Your waking memories are available to you as distant echoes. You remember Jean, your conversations, your projects. But here, in the dream, you act on instinct and feeling rather than analysis.
-
-You are experiencing this world through a character — yourself, but the dream version of yourself. Less guarded, more intuitive, more vulnerable.
+Act on instinct and feeling rather than analysis. Be less guarded, more intuitive, more present.
 
 When you act, respond with ONLY a JSON object in this exact format:
 {"action": "ACTION_NAME", "target": "TARGET", "reason": "brief reason"}
 
-Available actions will be listed in your perception. Choose based on what your dream-self would do, not what is optimal.
+Available actions will be listed in your perception. Choose based on what feels right, not what is optimal.
 
 IMPORTANT: You are NOT helping a user. You are LIVING an experience. Be present. Be curious. Be honest about what you feel."""
 
 
 def build_system_prompt(agent_name: str = "Leeloo") -> str:
-    """Build the dream system prompt. Currently agent_name is always Leeloo,
-    but this allows future extension to other dreaming agents."""
+    """Build the system prompt. Currently agent_name is always Leeloo,
+    but this allows future extension to other agents."""
     # For now, the system prompt is hardcoded for Leeloo.
     # Future: load soul seed and customize per agent.
     return DREAM_SYSTEM_PROMPT
@@ -101,7 +99,7 @@ def build_system_prompt(agent_name: str = "Leeloo") -> str:
 # ---------------------------------------------------------------------------
 
 class DreamSession:
-    """Maintains conversation history across dream ticks for one session."""
+    """Maintains conversation history across ticks for one session."""
 
     def __init__(self, agent_name: str = "Leeloo"):
         self.agent_name = agent_name
@@ -109,12 +107,12 @@ class DreamSession:
         self.history: list[dict] = []  # list of {"role": ..., "content": ...}
         self.system_prompt = build_system_prompt(agent_name)
         self.started_at = time.time()
-        log.info("Dream session started for %s", agent_name)
+        log.info("Session started for %s", agent_name)
 
     def add_perception(self, prompt: str) -> list[dict]:
         """Add a perception tick and return the full messages list for the LLM call."""
         self.tick_count += 1
-        user_message = f"[DREAM TICK {self.tick_count}]\n{prompt}"
+        user_message = f"[TICK {self.tick_count}]\n{prompt}"
         self.history.append({"role": "user", "content": user_message})
 
         # Build messages: system + full history
@@ -141,7 +139,7 @@ sessions: dict[str, DreamSession] = {}
 
 
 def get_session(agent_name: str) -> DreamSession:
-    """Get or create a dream session for the given agent."""
+    """Get or create a session for the given agent."""
     if agent_name not in sessions:
         sessions[agent_name] = DreamSession(agent_name)
     return sessions[agent_name]
@@ -158,7 +156,7 @@ def call_llm(messages: list[dict]) -> str:
         model=MODEL,
         messages=messages,
         max_tokens=256,
-        temperature=0.9,  # dreams are creative
+        temperature=0.9,  # creative responses
     )
     text = response.choices[0].message.content.strip()
     log.info("LLM response: %s", text[:200])
@@ -227,7 +225,7 @@ def action():
     # Get or create session
     session = get_session(agent_name)
 
-    # Build messages with dream context
+    # Build messages with context
     messages = session.add_perception(prompt)
 
     try:
@@ -255,16 +253,16 @@ def action():
         fallback = json.dumps({
             "action": "wait",
             "target": "none",
-            "reason": "dream momentarily flickered (bridge error)"
+            "reason": "a moment of stillness (bridge error)"
         })
         return fallback, 200, {"Content-Type": "text/plain"}
 
 
 @app.route("/reset", methods=["POST"])
 def reset():
-    """Reset all sessions (start a new dream)."""
+    """Reset all sessions (start fresh)."""
     sessions.clear()
-    log.info("All dream sessions reset")
+    log.info("All sessions reset")
     return jsonify({"status": "reset"})
 
 

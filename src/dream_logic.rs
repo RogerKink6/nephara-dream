@@ -541,11 +541,7 @@ pub fn build_dream_perception(
     }
 
     let mut lines = Vec::new();
-    lines.push("DREAM STATE:".to_string());
-    lines.push(format!("  Dream phase: {} (intensity: {:.0}%)",
-        state.phase.label(),
-        config.intensity * state.phase.intensity_multiplier() * 100.0
-    ));
+    lines.push("SURROUNDINGS:".to_string());
 
     if state.emotion != DreamEmotion::Neutral {
         lines.push(format!("  Emotional atmosphere: {:?}", state.emotion));
@@ -567,16 +563,13 @@ pub fn build_dream_perception(
     // Add recent transformations (last 2)
     let recent_transforms: Vec<&Transformation> = state.transformations.iter().rev().take(2).collect();
     if !recent_transforms.is_empty() {
-        lines.push("  Recent dream shifts:".to_string());
+        lines.push("  Recent shifts:".to_string());
         for t in recent_transforms {
             lines.push(format!("    - {}", t.description));
         }
     }
 
-    // Dream logic reminder for the agent
-    lines.push(String::new());
-    lines.push("  [This is a dream. Things may not follow normal logic. Distances shift,".to_string());
-    lines.push("   people transform, and your emotions shape the world around you.]".to_string());
+
 
     format!("\n{}\n", lines.join("\n"))
 }
@@ -913,8 +906,7 @@ mod tests {
         state.phase = DreamPhase::Middle;
 
         let perception = build_dream_perception(&config, &state);
-        assert!(perception.contains("DREAM STATE:"), "perception should contain DREAM STATE header");
-        assert!(perception.contains("middle"), "perception should contain phase label");
+        assert!(perception.contains("SURROUNDINGS:"), "perception should contain SURROUNDINGS header");
     }
 
     #[test]
@@ -949,7 +941,7 @@ mod tests {
         });
 
         let perception = build_dream_perception(&config, &state);
-        assert!(perception.contains("Recent dream shifts"), "perception should include recent transforms");
+        assert!(perception.contains("Recent shifts"), "perception should include recent transforms");
         assert!(perception.contains("A test transformation occurred"));
     }
 

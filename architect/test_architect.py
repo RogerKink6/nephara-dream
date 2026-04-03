@@ -495,6 +495,11 @@ class TestConfigValidation:
                 "transformation_chance": 0.1,
                 "time_dilation": {"enabled": True, "min_factor": 0.5, "max_factor": 2.0},
             },
+            "memory_fragments": [
+                {"source": "conversation", "dream_version": "words that taste like copper", "distortion_type": "condensation"},
+                {"source": "emotion", "dream_version": "a color with no name pulsing in the walls", "distortion_type": "displacement"},
+                {"source": "unresolved_tension", "dream_version": "two doors that keep swapping places", "distortion_type": "reversal"},
+            ],
         }
 
     def test_valid_config_passes(self):
@@ -619,6 +624,11 @@ class TestConfigMatchesSchema:
                     "personality_prompt": "test",
                 }
                 for i in range(3)
+            ],
+            "memory_fragments": [
+                {"source": "conversation", "dream_version": "echoing words", "distortion_type": "condensation"},
+                {"source": "emotion", "dream_version": "a shifting hue", "distortion_type": "displacement"},
+                {"source": "event", "dream_version": "a door that wasn't there", "distortion_type": "reversal"},
             ],
         }
         errors = architect.validate_config(config)

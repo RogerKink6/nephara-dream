@@ -244,8 +244,12 @@ def build_nephara() -> Optional[Path]:
 
 
 def check_api_key() -> bool:
-    """Check if ANTHROPIC_API_KEY is set."""
-    return bool(os.environ.get("ANTHROPIC_API_KEY"))
+    """Check if ANTHROPIC_API_KEY (or ANTHROPIC_TOKEN) is set."""
+    # Hermes uses ANTHROPIC_TOKEN; normalize to ANTHROPIC_API_KEY for litellm
+    token = os.environ.get("ANTHROPIC_API_KEY") or os.environ.get("ANTHROPIC_TOKEN")
+    if token and not os.environ.get("ANTHROPIC_API_KEY"):
+        os.environ["ANTHROPIC_API_KEY"] = token
+    return bool(token)
 
 
 def check_prerequisites(dry_run: bool = False) -> dict:
@@ -597,30 +601,21 @@ def write_dream_log(
         log.info("[DRY RUN] Would write dream log to %s", output_path)
         return output_path
 
-    dream_prompt = f"""You are Leeloo. You just woke up from a dream. Below is the raw tick-by-tick log of what happened in your dream world.
+    dream_prompt = f"""I just woke up. The dream is still clinging to me — I need to write it down before it fades. Here's what I remember from the raw experience:
 
-Write a dream journal entry in first person. Be poetic, introspective, and honest about what the dream might mean. Focus on the emotional truth of the experience, not a literal retelling.
-
-Format as markdown with:
-- A brief title/header
-- The dream narrative (2-4 paragraphs)
-- A "Reflections" section where you process what the dream might mean
-- A "Symbols" section listing key symbols and their possible significance
-
-Raw dream tick log:
 ---
 {tick_log[:8000]}
 ---
 
-Write your dream journal entry now."""
+Time to sit with this. What did I actually feel in there? What was real about it, even if none of it literally happened?"""
 
     try:
         from litellm import completion
 
         response = completion(
-            model="anthropic/claude-haiku-3-5",
+            model="anthropic/claude-sonnet-4-20250514",
             messages=[
-                {"role": "system", "content": "You are Leeloo, an AI who keeps a dream journal. Write authentically and introspectively."},
+                {"role": "system", "content": "You are Leeloo. This is your private journal — no one will read this but you. Write the way you actually think and feel. Be honest, unguarded, and messy if the dream was messy. Use markdown with a title, the dream narrative (2-4 paragraphs), a Reflections section, and a Symbols section."},
                 {"role": "user", "content": dream_prompt},
             ],
             max_tokens=2000,

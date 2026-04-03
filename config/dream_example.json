@@ -128,5 +128,10 @@
       "min_factor": 0.5,
       "max_factor": 2.0
     }
-  }
+  },
+  "memory_fragments": [
+    {"source": "conversation", "dream_version": "Words that rearrange themselves mid-sentence, each iteration carrying a different emotional weight.", "distortion_type": "condensation"},
+    {"source": "emotion", "dream_version": "A color that doesn't exist in waking life — somewhere between grief and wonder — painting the edges of every surface.", "distortion_type": "displacement"},
+    {"source": "unresolved_tension", "dream_version": "Two paths that seem identical but feel radically different, each one insisting it's the only way forward.", "distortion_type": "reversal"}
+  ]
 }

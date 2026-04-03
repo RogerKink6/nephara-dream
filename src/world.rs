@@ -4651,7 +4651,7 @@ mod tests {
         let world = dream_world();
         let perception = world.build_dream_perception_block();
         assert!(!perception.is_empty(), "dream perception block should not be empty");
-        assert!(perception.contains("DREAM STATE:"), "perception should contain DREAM STATE");
+        assert!(perception.contains("SURROUNDINGS:"), "perception should contain SURROUNDINGS");
     }
 
     #[test]

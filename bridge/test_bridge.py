@@ -32,7 +32,7 @@ class TestSystemPrompt:
 
     def test_system_prompt_mentions_dreaming(self):
         prompt = build_system_prompt("Leeloo")
-        assert "dreaming" in prompt
+        assert "You are here, in this place, right now" in prompt
 
     def test_system_prompt_mentions_json_format(self):
         prompt = build_system_prompt("Leeloo")
@@ -74,7 +74,7 @@ class TestDreamSession:
         assert len(messages) == 2
         assert messages[0]["role"] == "system"
         assert messages[1]["role"] == "user"
-        assert "[DREAM TICK 1]" in messages[1]["content"]
+        assert "[TICK 1]" in messages[1]["content"]
         assert "You see a forest." in messages[1]["content"]
 
     def test_history_accumulates(self):
@@ -92,8 +92,8 @@ class TestDreamSession:
         assert messages[1]["role"] == "user"
         assert messages[2]["role"] == "assistant"
         assert messages[3]["role"] == "user"
-        assert "[DREAM TICK 1]" in messages[1]["content"]
-        assert "[DREAM TICK 2]" in messages[3]["content"]
+        assert "[TICK 1]" in messages[1]["content"]
+        assert "[TICK 2]" in messages[3]["content"]
 
     def test_session_stats(self):
         session = DreamSession("Leeloo")
@@ -230,9 +230,9 @@ class TestActionEndpoint:
         # Check what messages were passed to LLM
         call_args = mock_llm.call_args[0][0]
         assert call_args[0]["role"] == "system"
-        assert "dreaming" in call_args[0]["content"]
+        assert "You are here, in this place, right now" in call_args[0]["content"]
         assert call_args[1]["role"] == "user"
-        assert "[DREAM TICK 1]" in call_args[1]["content"]
+        assert "[TICK 1]" in call_args[1]["content"]
         assert "A glowing door appears." in call_args[1]["content"]
 
 
