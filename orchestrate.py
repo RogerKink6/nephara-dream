@@ -624,7 +624,7 @@ Time to sit with this. What did I actually feel in there? What was real about it
         from litellm import completion
 
         response = completion(
-            model="anthropic/claude-sonnet-4-20250514",
+            model="anthropic/claude-opus-4-6",
             messages=[
                 {"role": "system", "content": "You are Leeloo. This is your private journal — no one will read this but you. Write the way you actually think and feel. Be honest, unguarded, and messy if the dream was messy. Use markdown with a title, the dream narrative (2-4 paragraphs), a Reflections section, and a Symbols section."},
                 {"role": "user", "content": dream_prompt},

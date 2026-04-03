@@ -38,7 +38,7 @@ from litellm import completion
 # ---------------------------------------------------------------------------
 
 PORT = int(os.environ.get("HERMES_BRIDGE_PORT", 7777))
-MODEL = os.environ.get("HERMES_MODEL", "anthropic/claude-sonnet-4-20250514")
+MODEL = os.environ.get("HERMES_MODEL", "anthropic/claude-opus-4-6")
 PROVIDER = os.environ.get("HERMES_PROVIDER", "anthropic")
 
 # Load .env from ~/.hermes/.env if ANTHROPIC_API_KEY not already set

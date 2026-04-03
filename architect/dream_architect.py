@@ -36,7 +36,7 @@ log = logging.getLogger("dream-architect")
 # Configuration
 # ---------------------------------------------------------------------------
 
-ARCHITECT_MODEL = os.environ.get("DREAM_ARCHITECT_MODEL", "anthropic/claude-sonnet-4-20250514")
+ARCHITECT_MODEL = os.environ.get("DREAM_ARCHITECT_MODEL", "anthropic/claude-opus-4-6")
 STAGING_BASE = Path.home() / ".hermes" / "dream-logs" / "staging"
 DREAM_LOGS_BASE = Path.home() / ".hermes" / "dream-logs"
 INDIVIDUATION_PATH = DREAM_LOGS_BASE / "individuation_state.json"
