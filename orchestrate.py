@@ -152,14 +152,25 @@ def check_ollama_running() -> bool:
 
 
 def start_ollama() -> bool:
-    """Start Ollama serve in background."""
+    """Start Ollama — try macOS app first, then ollama serve as fallback."""
     log.info("Starting Ollama...")
     try:
-        subprocess.Popen(
-            [OLLAMA_BIN, "serve"],
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-        )
+        # On macOS, prefer opening the Ollama.app (more reliable than `ollama serve`)
+        ollama_app = Path("/Applications/Ollama.app")
+        if ollama_app.exists():
+            log.info("Opening Ollama.app...")
+            subprocess.Popen(
+                ["open", "-a", "Ollama"],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+        else:
+            log.info("Ollama.app not found, falling back to `ollama serve`...")
+            subprocess.Popen(
+                [OLLAMA_BIN, "serve"],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
         # Wait for it to come up
         for _ in range(30):
             time.sleep(1)
