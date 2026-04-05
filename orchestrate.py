@@ -48,7 +48,7 @@ OLLAMA_URL = "http://localhost:11434"
 BRIDGE_URL = "http://localhost:7777"
 BRIDGE_HEALTH_URL = f"{BRIDGE_URL}/health"
 DEFAULT_TICKS = 36
-DEFAULT_MODEL = "mistral:7b"
+DEFAULT_MODEL = "llama3.2:3b"
 DREAM_CONFIG_PATH = Path("/tmp/nephara-dream/dream_world_config.json")
 
 # ---------------------------------------------------------------------------
