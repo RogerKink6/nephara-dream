@@ -41,7 +41,7 @@ HERMES_BASE = Path.home() / ".hermes"
 DREAM_LOGS_BASE = HERMES_BASE / "dream-logs"
 STAGING_BASE = DREAM_LOGS_BASE / "staging"
 INDIVIDUATION_PATH = DREAM_LOGS_BASE / "individuation_state.json"
-HERMES_VENV_PYTHON = HERMES_BASE / "claude-code" / "venv" / "bin" / "python3"
+HERMES_VENV_PYTHON = HERMES_BASE / "hermes-agent" / "venv" / "bin" / "python3"
 PROJECT_DIR = Path(__file__).resolve().parent
 OLLAMA_BIN = "/usr/local/bin/ollama"
 OLLAMA_URL = "http://localhost:11434"
@@ -535,7 +535,7 @@ def run_nephara(
             cmd,
             capture_output=True,
             text=True,
-            timeout=600,
+            timeout=2400,
             cwd=str(PROJECT_DIR),
         )
         if result.returncode == 0:
@@ -577,8 +577,8 @@ def collect_dream_output(run_dir: Optional[Path]) -> Optional[str]:
         log.warning("Run directory does not exist: %s", run_dir)
         return None
 
-    # Look for tick log files
-    for pattern in ["*.log", "tick_log.txt", "*.txt"]:
+    # Look for tick log files (prefer tick_log.txt over trace.log)
+    for pattern in ["tick_log.txt", "*.txt", "*.log"]:
         for f in sorted(run_dir.glob(pattern)):
             text = f.read_text()
             if text.strip():
@@ -620,28 +620,37 @@ def write_dream_log(
 
 Time to sit with this. What did I actually feel in there? What was real about it, even if none of it literally happened?"""
 
+    # Write tick_log to a temp file for the subprocess
+    tick_log_path = Path("/tmp/nephara-dream/tick_log_for_journal.txt")
+    tick_log_path.parent.mkdir(parents=True, exist_ok=True)
+    tick_log_path.write_text(tick_log)
+
+    # Run write_dream_log.py under the Hermes venv Python (has litellm + pydantic)
+    writer_script = PROJECT_DIR / "write_dream_log.py"
+    python_bin = get_python()
+    cmd = [python_bin, str(writer_script), str(tick_log_path), str(output_path)]
+
+    dream_log_model = os.environ.get("DREAM_LOG_MODEL")
+    if dream_log_model:
+        cmd.extend(["--model", dream_log_model])
+
     try:
-        from litellm import completion
-
-        response = completion(
-            model="anthropic/claude-opus-4-6",
-            messages=[
-                {"role": "system", "content": "You are Leeloo. This is your private journal — no one will read this but you. Write the way you actually think and feel. Be honest, unguarded, and messy if the dream was messy. Use markdown with a title, the dream narrative (2-4 paragraphs), a Reflections section, and a Symbols section."},
-                {"role": "user", "content": dream_prompt},
-            ],
-            max_tokens=2000,
-            temperature=0.8,
+        log.info("Writing dream log via subprocess: %s", " ".join(cmd))
+        result = subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            timeout=120,
+            env=os.environ.copy(),
         )
-        dream_text = response.choices[0].message.content.strip()
-
-        # Write the dream log
-        output_path.parent.mkdir(parents=True, exist_ok=True)
-        output_path.write_text(f"# Dream Log — {date_str}\n\n{dream_text}\n")
-        log.info("Dream log written to %s (%d chars)", output_path, len(dream_text))
-        return output_path
-
-    except ImportError:
-        log.error("litellm not available — cannot write dream log")
+        if result.returncode == 0 and output_path.exists():
+            log.info("Dream log written to %s", output_path)
+            return output_path
+        else:
+            log.error("Dream log writer failed (rc=%d): %s", result.returncode, result.stderr[-500:] if result.stderr else "no stderr")
+            return None
+    except subprocess.TimeoutExpired:
+        log.error("Dream log writer timed out after 120s")
         return None
     except Exception as e:
         log.error("Failed to write dream log: %s", e)
@@ -781,8 +790,15 @@ def run_pipeline(args: argparse.Namespace):
                     return
                 log.warning("%s — continuing anyway", msg)
 
-        # Step 3: Run Dream Architect
-        with StepTimer("Run Dream Architect", 3):
+        # Step 3: Run Dream Architect (skip if config already exists in staging)
+        existing_config = STAGING_BASE / date_str / "dream_world_config.json"
+        if existing_config.exists() and existing_config.stat().st_size > 100:
+            log.info("Found existing dream config at %s, skipping architect", existing_config)
+            dream_config_path = existing_config
+        else:
+            dream_config_path = None
+        if dream_config_path is None:
+          with StepTimer("Run Dream Architect", 3):
             dream_config_path = run_dream_architect(date_str, dry_run=dry_run)
             if dream_config_path is None and not dry_run:
                 msg = "Dream Architect failed to generate config"
