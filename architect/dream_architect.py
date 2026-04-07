@@ -36,7 +36,7 @@ log = logging.getLogger("dream-architect")
 # Configuration
 # ---------------------------------------------------------------------------
 
-ARCHITECT_MODEL = os.environ.get("DREAM_ARCHITECT_MODEL", "anthropic/claude-opus-4-6")
+ARCHITECT_MODEL = os.environ.get("DREAM_ARCHITECT_MODEL", "openai/glm-5.1")
 STAGING_BASE = Path.home() / ".hermes" / "dream-logs" / "staging"
 DREAM_LOGS_BASE = Path.home() / ".hermes" / "dream-logs"
 INDIVIDUATION_PATH = DREAM_LOGS_BASE / "individuation_state.json"
@@ -44,7 +44,7 @@ RECURRING_THREADS_PATH = DREAM_LOGS_BASE / "recurring-threads.json"
 
 
 def _load_env():
-    """Load .env from ~/.hermes/.env if ANTHROPIC_API_KEY not already set."""
+    """Load .env from ~/.hermes/.env for ZAI and other API keys."""
     env_path = Path.home() / ".hermes" / ".env"
     if env_path.exists():
         for line in env_path.read_text().splitlines():
@@ -140,6 +140,11 @@ Not everything resolves. Some doors stay closed.
 Conflict → bridges that dissolve. NEVER recreate waking events directly.
 2. No character or narration should acknowledge this is a dream.
 3. Design the world as if it's simply reality — strange reality, but reality.
+4. ABSTRACTION OVER EXPLANATION: Do NOT label things with Jungian terminology. \
+Never name archetypes explicitly in descriptions. A Shadow NPC is not "the shadow" — \
+they are a specific person with a specific name, job, and personality. The Jungian \
+framework is YOUR design tool, invisible to the dreamer. The dream should feel \
+mysterious, not academic. Symbols should be felt, not decoded.
 
 ## Output Format
 Generate a dream_world_config.json with this exact structure:
@@ -232,6 +237,10 @@ Generate a dream_world_config.json with this exact structure:
 8. The initial_situation must feel like joining something in progress, not a fresh start.
 9. Include at least one uncomfortable/challenging element (threat rehearsal).
 10. Respond with ONLY the JSON. No explanation, no markdown, no commentary.
+11. You MUST follow the exact JSON schema above. Do NOT invent your own format. \
+The output must contain ALL required top-level keys: "world", "locations", "npcs", \
+"leeloo", "memory_fragments", "initial_situation", "dream_logic". Missing any of \
+these keys means your output is INVALID and will be rejected.
 """
 
 
@@ -564,7 +573,12 @@ class DreamArchitect:
         return "\n\n".join(sections)
 
     def call_llm(self, prompt: str) -> str:
-        """Call the LLM to generate the dream world config."""
+        """Call the LLM to generate the dream world config.
+        
+        Tries the primary model first, then falls back through alternatives:
+        1. Primary model (DREAM_ARCHITECT_MODEL or openai/glm-5.1 via ZAI)
+        2. Ollama local model (no API key needed, last resort)
+        """
         try:
             from litellm import completion
         except ImportError:
@@ -572,17 +586,70 @@ class DreamArchitect:
                 "litellm is required. Install with: pip install litellm"
             )
 
-        log.info("Calling %s for dream generation", self.model)
-        response = completion(
-            model=self.model,
-            messages=[
-                {"role": "system", "content": ARCHITECT_SYSTEM_PROMPT},
-                {"role": "user", "content": prompt},
-            ],
-            max_tokens=4096,
-            temperature=0.85,
+        # Build fallback chain
+        fallback_models = [self.model]
+        # ZAI is primary, no Anthropic fallback needed
+        # Ensure ZAI env vars are set for litellm openai/ routing
+        zai_key = os.environ.get("ZAI_API_KEY") or os.environ.get("GLM_API_KEY")
+        if zai_key:
+            zai_base = os.environ.get("GLM_BASE_URL", "https://api.z.ai/api/coding/paas/v4")
+            os.environ.setdefault("ZAI_API_BASE", zai_base)
+        ollama_model = os.environ.get("OLLAMA_DREAM_MODEL", "ollama/gemma4:e4b")
+        if ollama_model not in fallback_models:
+            fallback_models.append(ollama_model)
+
+        messages = [
+            {"role": "system", "content": ARCHITECT_SYSTEM_PROMPT},
+            {"role": "user", "content": prompt},
+        ]
+
+        last_error = None
+        for model in fallback_models:
+            try:
+                log.info("Calling %s for dream generation", model)
+                # Ollama models need more tokens and a stronger JSON nudge
+                model_max_tokens = 16000 if "ollama" in model else 8000
+                model_messages = messages
+                if "ollama" in model:
+                    # Reinforce JSON-only output for weaker models
+                    model_messages = [
+                        {"role": "system", "content": messages[0]["content"] + "\n\nIMPORTANT: You MUST output ONLY valid JSON matching the schema. No markdown, no explanation, no narrative text. Start your response with { and end with }. This is critical."},
+                        messages[1],
+                        {"role": "assistant", "content": "{"},
+                    ]
+                # Build extra kwargs for Z.AI routing
+                extra_kwargs = {}
+                if model.startswith("openai/glm"):
+                    extra_kwargs["api_base"] = os.environ.get("ZAI_API_BASE", "https://api.z.ai/api/coding/paas/v4")
+                    extra_kwargs["api_key"] = os.environ.get("ZAI_API_KEY") or os.environ.get("GLM_API_KEY", "")
+                response = completion(
+                    model=model,
+                    messages=model_messages,
+                    max_tokens=model_max_tokens,
+                    temperature=0.7 if "ollama" in model else 0.85,
+                    num_retries=1,
+                    **extra_kwargs,
+                )
+                result = response.choices[0].message.content.strip()
+                # If we prefilled with '{', prepend it back
+                if "ollama" in model and not result.startswith("{"):
+                    result = "{" + result
+                return result
+            except Exception as e:
+                last_error = e
+                error_str = str(e)
+                if "429" in error_str or "rate" in error_str.lower():
+                    log.warning("Rate limited on %s, trying next model...", model)
+                elif "401" in error_str or "auth" in error_str.lower() or "api_key" in error_str.lower():
+                    log.warning("Auth error on %s, trying next model...", model)
+                elif "Metal" in error_str or "GPU" in error_str or "buffer" in error_str.lower():
+                    log.warning("GPU/Metal error on %s (try reducing model size), trying next model...", model)
+                else:
+                    log.warning("Error on %s: %s, trying next model...", model, error_str[:200])
+
+        raise RuntimeError(
+            f"All models failed for dream generation. Last error: {last_error}"
         )
-        return response.choices[0].message.content.strip()
 
     def extract_json(self, response: str) -> dict:
         """Extract and parse JSON from the LLM response."""
@@ -605,6 +672,21 @@ class DreamArchitect:
         if brace_match:
             try:
                 return json.loads(brace_match.group(0))
+            except json.JSONDecodeError:
+                pass
+
+        # Try to repair truncated JSON by closing open braces/brackets
+        brace_start = re.search(r'\{', response)
+        if brace_start:
+            fragment = response[brace_start.start():]
+            # Count unclosed braces and brackets
+            open_braces = fragment.count('{') - fragment.count('}')
+            open_brackets = fragment.count('[') - fragment.count(']')
+            # Strip trailing comma or incomplete value
+            repaired = fragment.rstrip().rstrip(',')
+            repaired += ']' * open_brackets + '}' * open_braces
+            try:
+                return json.loads(repaired)
             except json.JSONDecodeError:
                 pass
 

@@ -255,11 +255,8 @@ def build_nephara() -> Optional[Path]:
 
 
 def check_api_key() -> bool:
-    """Check if ANTHROPIC_API_KEY (or ANTHROPIC_TOKEN) is set."""
-    # Hermes uses ANTHROPIC_TOKEN; normalize to ANTHROPIC_API_KEY for litellm
-    token = os.environ.get("ANTHROPIC_API_KEY") or os.environ.get("ANTHROPIC_TOKEN")
-    if token and not os.environ.get("ANTHROPIC_API_KEY"):
-        os.environ["ANTHROPIC_API_KEY"] = token
+    """Check if ZAI_API_KEY is set (primary provider)."""
+    token = os.environ.get("ZAI_API_KEY") or os.environ.get("GLM_API_KEY")
     return bool(token)
 
 
@@ -386,7 +383,7 @@ def run_dream_architect(date_str: str, dry_run: bool = False) -> Optional[Path]:
             cmd,
             capture_output=True,
             text=True,
-            timeout=120,
+            timeout=300,
             cwd=str(PROJECT_DIR),
             env={**os.environ, "PYTHONPATH": str(PROJECT_DIR)},
         )
@@ -417,7 +414,7 @@ def run_dream_architect(date_str: str, dry_run: bool = False) -> Optional[Path]:
                 log.error("stderr: %s", result.stderr[:500])
             return None
     except subprocess.TimeoutExpired:
-        log.error("Dream Architect timed out after 120s")
+        log.error("Dream Architect timed out after 300s")
         return None
     except Exception as e:
         log.error("Dream Architect error: %s", e)
@@ -535,7 +532,7 @@ def run_nephara(
             cmd,
             capture_output=True,
             text=True,
-            timeout=2400,
+            timeout=5400,
             cwd=str(PROJECT_DIR),
         )
         if result.returncode == 0:
@@ -558,7 +555,7 @@ def run_nephara(
                 log.error("stderr (last 500): %s", result.stderr[-500:])
             return None
     except subprocess.TimeoutExpired:
-        log.error("Nephara timed out after 600s")
+        log.error("Nephara timed out after 5400s")
         return None
     except Exception as e:
         log.error("Nephara error: %s", e)

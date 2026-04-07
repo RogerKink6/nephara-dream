@@ -37,15 +37,21 @@ def main():
 
 Time to sit with this. What did I actually feel in there? What was real about it, even if none of it literally happened?"""
 
-    # Normalize API key
-    token = os.environ.get("ANTHROPIC_API_KEY") or os.environ.get("ANTHROPIC_TOKEN")
-    if token and not os.environ.get("ANTHROPIC_API_KEY"):
-        os.environ["ANTHROPIC_API_KEY"] = token
+    # Load .env for ZAI keys
+    from pathlib import Path as _Path
+    env_path = _Path.home() / ".hermes" / ".env"
+    if env_path.exists():
+        for line in env_path.read_text().splitlines():
+            line = line.strip()
+            if line and not line.startswith("#") and "=" in line:
+                key, _, value = line.partition("=")
+                key = key.strip()
+                value = value.strip().strip('"').strip("'")
+                if key and value and key not in os.environ:
+                    os.environ[key] = value
 
-    dream_log_model = args.model or os.environ.get("DREAM_LOG_MODEL", "anthropic/claude-opus-4-6")
+    dream_log_model = args.model or os.environ.get("DREAM_LOG_MODEL", "openai/glm-5.1")
     fallback_models = [dream_log_model]
-    if "opus" in dream_log_model:
-        fallback_models.append("anthropic/claude-sonnet-4-20250514")
     ollama_model = os.environ.get("OLLAMA_DREAM_MODEL", "ollama/gemma4:e4b")
     if ollama_model not in fallback_models:
         fallback_models.append(ollama_model)
@@ -54,6 +60,10 @@ Time to sit with this. What did I actually feel in there? What was real about it
     for model in fallback_models:
         try:
             log.info("Writing dream log with %s", model)
+            extra_kwargs = {}
+            if model.startswith("openai/glm"):
+                extra_kwargs["api_base"] = os.environ.get("GLM_BASE_URL", "https://api.z.ai/api/coding/paas/v4")
+                extra_kwargs["api_key"] = os.environ.get("ZAI_API_KEY") or os.environ.get("GLM_API_KEY", "")
             response = completion(
                 model=model,
                 messages=[
@@ -63,6 +73,7 @@ Time to sit with this. What did I actually feel in there? What was real about it
                 max_tokens=2000,
                 temperature=0.8,
                 num_retries=1,
+                **extra_kwargs,
             )
             break
         except Exception as e:
